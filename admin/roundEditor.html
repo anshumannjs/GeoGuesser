@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Round Editor — GeoGuessr Admin</title>
+  <link rel="stylesheet" href="/css/style.css" />
+
+  <style>
+    /* ── Layout ─────────────────────────────────────────────────── */
+    html, body { height: 100%; overflow: hidden; }
+
+    #app {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      grid-template-rows: 48px 1fr;
+      height: 100vh;
+    }
+
+    /* ── Top bar ─────────────────────────────────────────────────── */
+    #topbar {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    .topbar-title {
+      font-family: var(--font-display);
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .topbar-title span {
+      color: var(--accent);
+    }
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    /* ── Map canvas area ─────────────────────────────────────────── */
+    #canvas-area {
+      position: relative;
+      overflow: hidden;
+      background: #080808;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #campus-img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: block;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+    #pin-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    /* Drop zone shown when no image loaded */
+    #drop-zone {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      border: 2px dashed var(--border);
+      margin: 2rem;
+      border-radius: var(--radius-lg);
+      transition: border-color 200ms ease, background 200ms ease;
+    }
+    #drop-zone.dragover {
+      border-color: var(--accent);
+      background: rgba(200,241,53,0.04);
+    }
+    .drop-icon { font-size: 2.5rem; }
+    .drop-label {
+      font-family: var(--font-display);
+      font-size: 1rem;
+      color: var(--text-secondary);
+    }
+    .drop-sub {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      opacity: 0.6;
+    }
+
+    /* ── Sidebar ──────────────────────────────────────────────────── */
+    #sidebar {
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid var(--border);
+      background: var(--surface);
+      overflow: hidden;
+    }
+
+    /* Tabs */
+    #tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .tab {
+      flex: 1;
+      padding: 0.75rem 0;
+      font-family: var(--font-display);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
+      color: var(--text-secondary);
+      border-bottom: 2px solid transparent;
+      transition: color 150ms ease, border-color 150ms ease;
+      user-select: none;
+    }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab-panel { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+    .tab-panel.active { display: flex; }
+
+    /* ── Pin tab ─────────────────────────────────────────────────── */
+    #tab-pin {
+      padding: 1rem;
+      gap: 1rem;
+      overflow-y: auto;
+    }
+
+    .field-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+    .field-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
+    /* Coord readout */
+    #coord-display {
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.75rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .coord-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .coord-key {
+      font-family: var(--font-display);
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+    .coord-value {
+      font-family: var(--font-display);
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
+    .coord-value.unset { color: var(--text-secondary); }
+
+    /* Crosshair indicator */
+    #crosshair-info {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      text-align: center;
+      padding: 0.25rem 0;
+    }
+
+    /* JSON output */
+    #json-output {
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.875rem;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.75rem;
+      line-height: 1.6;
+      color: var(--text-primary);
+      white-space: pre;
+      overflow-x: auto;
+      min-height: 100px;
+      user-select: all;
+    }
+    .json-key     { color: #9cdcfe; }
+    .json-string  { color: #ce9178; }
+    .json-number  { color: var(--accent); }
+    .json-null    { color: var(--text-secondary); }
+
+    /* ── Rounds list tab ─────────────────────────────────────────── */
+    #tab-list {
+      overflow: hidden;
+    }
+    #rounds-list-wrap {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem 0;
+    }
+    .round-list-item {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.625rem 1rem;
+      cursor: pointer;
+      transition: background 120ms ease;
+      border-left: 3px solid transparent;
+    }
+    .round-list-item:hover { background: var(--surface-raised); }
+    .round-list-item.selected {
+      background: rgba(200,241,53,0.06);
+      border-left-color: var(--accent);
+    }
+    .rli-chip {
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 0.15rem 0.4rem;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+    .rli-chip.campus { background: #1a2910; color: var(--accent); }
+    .rli-chip.world  { background: #1a2940; color: #6aaee8; }
+    .rli-label {
+      flex: 1;
+      font-size: 0.875rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .rli-status {
+      font-size: 0.7rem;
+      flex-shrink: 0;
+    }
+    .rli-status.ok     { color: var(--accent); }
+    .rli-status.missing { color: var(--red); }
+
+    #list-footer {
+      flex-shrink: 0;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    #list-footer .btn { width: 100%; }
+
+    /* ── Instructions overlay ────────────────────────────────────── */
+    #instructions {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      background: rgba(13,13,13,0.85);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.625rem 0.875rem;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+      line-height: 1.6;
+      max-width: 260px;
+    }
+    #instructions.hidden { display: none; }
+    #instructions strong { color: var(--text-primary); }
+
+    /* ── Modal ───────────────────────────────────────────────────── */
+    #modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+    #modal-overlay.open { display: flex; }
+    #modal {
+      width: 420px;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+    #modal h3 {
+      font-family: var(--font-display);
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .modal-fields {
+      display: flex;
+      flex-direction: column;
+      gap: 0.875rem;
+    }
+    .modal-actions {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: flex-end;
+    }
+  </style>
+</head>
+
+<body>
+<div id="app">
+
+  <!-- ── Top bar ──────────────────────────────────────────────────── -->
+  <div id="topbar">
+    <div class="topbar-title">
+      📍 <span>GeoGuessr</span> Admin — Round Editor
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-load-image" class="btn btn-ghost" style="font-size:0.8rem">
+        Load Campus Map Image
+      </button>
+      <button id="btn-export-all" class="btn btn-accent" style="font-size:0.8rem">
+        Export campusRounds.json
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Canvas area ──────────────────────────────────────────────── -->
+  <div id="canvas-area">
+    <!-- Drop zone (shown when no image loaded) -->
+    <div id="drop-zone">
+      <span class="drop-icon">🗺️</span>
+      <p class="drop-label">Drop your campus map image here</p>
+      <p class="drop-sub">or use "Load Campus Map Image" above</p>
+      <button id="btn-drop-pick" class="btn btn-ghost" style="font-size:0.8rem;margin-top:0.5rem">
+        Browse File
+      </button>
+    </div>
+
+    <!-- Campus map image (hidden until loaded) -->
+    <img id="campus-img" src="" alt="Campus map" style="display:none" />
+
+    <!-- Pin overlay canvas -->
+    <canvas id="pin-canvas" style="display:none"></canvas>
+
+    <!-- Live instructions overlay -->
+    <div id="instructions" class="hidden">
+      <strong>Click</strong> on the map to place the answer pin<br>
+      <strong>Right-click</strong> to clear the pin<br>
+      <strong>Hover</strong> to preview coordinates
+    </div>
+  </div>
+
+  <!-- ── Sidebar ──────────────────────────────────────────────────── -->
+  <div id="sidebar">
+
+    <!-- Tabs -->
+    <div id="tab-bar">
+      <div class="tab active" data-tab="pin">Pin Editor</div>
+      <div class="tab"        data-tab="list">All Rounds</div>
+    </div>
+
+    <!-- Tab: Pin Editor -->
+    <div id="tab-pin" class="tab-panel active">
+
+      <!-- Round selector -->
+      <div class="field-group">
+        <label class="field-label" for="select-round">Active Round</label>
+        <select id="select-round" class="input" style="cursor:pointer">
+          <option value="">— select a round —</option>
+        </select>
+      </div>
+
+      <!-- Coordinate readout -->
+      <div class="field-group">
+        <label class="field-label">Answer Coordinates</label>
+        <div id="coord-display">
+          <div class="coord-row">
+            <span class="coord-key">x (normalised)</span>
+            <span class="coord-value unset" id="coord-x">—</span>
+          </div>
+          <div class="coord-row">
+            <span class="coord-key">y (normalised)</span>
+            <span class="coord-value unset" id="coord-y">—</span>
+          </div>
+        </div>
+        <p id="crosshair-info">Hover over the map to preview</p>
+      </div>
+
+      <!-- Round metadata -->
+      <div class="field-group">
+        <label class="field-label" for="input-label">Round Label</label>
+        <input id="input-label"    class="input" type="text" placeholder="e.g. Campus Round 1" />
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="input-photo">Photo URL / Path</label>
+        <input id="input-photo"    class="input" type="text" placeholder="/photos/campus/c01.jpg" />
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="input-hint">Location Hint (shown after round)</label>
+        <input id="input-hint"     class="input" type="text" placeholder="e.g. Central Library Courtyard" />
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="input-duration">Custom Duration (ms, optional)</label>
+        <input id="input-duration" class="input" type="number" placeholder="Leave blank for default (30000)" min="5000" step="1000" />
+      </div>
+
+      <div style="display:flex;gap:0.5rem">
+        <button id="btn-save-round" class="btn btn-accent" style="flex:1">Save Round</button>
+        <button id="btn-clear-pin"  class="btn btn-ghost">Clear Pin</button>
+      </div>
+
+      <!-- JSON preview -->
+      <div class="field-group">
+        <label class="field-label">JSON Preview (click to copy)</label>
+        <div id="json-output" title="Click to select all"></div>
+      </div>
+
+    </div>
+
+    <!-- Tab: All Rounds -->
+    <div id="tab-list" class="tab-panel">
+      <div id="rounds-list-wrap">
+        <div id="rounds-list"></div>
+      </div>
+      <div id="list-footer">
+        <button id="btn-add-round" class="btn btn-ghost" style="font-size:0.8rem">
+          + Add New Campus Round
+        </button>
+        <button id="btn-export-list" class="btn btn-accent" style="font-size:0.8rem">
+          Export campusRounds.json
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Hidden file input -->
+<input type="file" id="file-input" accept="image/*" style="display:none" />
+
+<!-- ── Add Round Modal ──────────────────────────────────────────────── -->
+<div id="modal-overlay">
+  <div id="modal" class="panel">
+    <h3>Add New Campus Round</h3>
+    <div class="modal-fields">
+      <div class="field-group">
+        <label class="field-label" for="modal-id">Round ID (unique, no spaces)</label>
+        <input id="modal-id" class="input" type="text" placeholder="e.g. c03" />
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="modal-label">Label</label>
+        <input id="modal-label" class="input" type="text" placeholder="Campus Round 3" />
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="modal-photo">Photo URL / Path</label>
+        <input id="modal-photo" class="input" type="text" placeholder="/photos/campus/c03.jpg" />
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button id="btn-modal-cancel" class="btn btn-ghost">Cancel</button>
+      <button id="btn-modal-confirm" class="btn btn-accent">Add Round</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════
+   Round Editor — standalone, no server dependency.
+   All state lives in memory; export downloads a .json file.
+══════════════════════════════════════════════════════════════════════ */
+
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {Object} CampusRound
+ * @property {string}      id
+ * @property {'campus'}    type
+ * @property {string}      label
+ * @property {string}      photoUrl
+ * @property {number|null} x
+ * @property {number|null} y
+ * @property {string}      [locationHint]
+ * @property {number}      [durationMs]
+ */
+
+/** @type {CampusRound[]} */
+let rounds = [];
+
+/** @type {string|null} */
+let activeRoundId = null;
+
+/** @type {{ x: number, y: number }|null} */
+let pendingCoord = null;
+
+/** @type {string|null}  Object URL for the loaded map image */
+let mapImageUrl = null;
+
+// Canvas drawing state
+let canvasHoverCoord = null;
+
+// ── DOM ───────────────────────────────────────────────────────────────
+
+const $ = (id) => document.getElementById(id);
+
+const els = {
+  dropZone:       $('drop-zone'),
+  campusImg:      $('campus-img'),
+  pinCanvas:      $('pin-canvas'),
+  instructions:   $('instructions'),
+  fileInput:      $('file-input'),
+
+  btnLoadImage:   $('btn-load-image'),
+  btnDropPick:    $('btn-drop-pick'),
+  btnExportAll:   $('btn-export-all'),
+  btnExportList:  $('btn-export-list'),
+
+  selectRound:    $('select-round'),
+  coordX:         $('coord-x'),
+  coordY:         $('coord-y'),
+  crosshairInfo:  $('crosshair-info'),
+
+  inputLabel:     $('input-label'),
+  inputPhoto:     $('input-photo'),
+  inputHint:      $('input-hint'),
+  inputDuration:  $('input-duration'),
+
+  btnSaveRound:   $('btn-save-round'),
+  btnClearPin:    $('btn-clear-pin'),
+  jsonOutput:     $('json-output'),
+
+  roundsList:     $('rounds-list'),
+  btnAddRound:    $('btn-add-round'),
+
+  modalOverlay:   $('modal-overlay'),
+  modalId:        $('modal-id'),
+  modalLabel:     $('modal-label'),
+  modalPhoto:     $('modal-photo'),
+  btnModalCancel: $('btn-modal-cancel'),
+  btnModalConfirm:$('btn-modal-confirm'),
+};
+
+// ── Tab switching ─────────────────────────────────────────────────────
+
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    const target = tab.dataset.tab;
+
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === target));
+    document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${target}`));
+
+    if (target === 'list') _renderRoundsList();
+  });
+});
+
+// ── Image Loading ─────────────────────────────────────────────────────
+
+function _loadImage(file) {
+  if (!file || !file.type.startsWith('image/')) {
+    _toast('Please select an image file', 'error');
+    return;
+  }
+
+  if (mapImageUrl) URL.revokeObjectURL(mapImageUrl);
+  mapImageUrl = URL.createObjectURL(file);
+
+  els.campusImg.onload = () => {
+    els.dropZone.style.display  = 'none';
+    els.campusImg.style.display = 'block';
+    els.pinCanvas.style.display = 'block';
+    els.instructions.classList.remove('hidden');
+    _syncCanvas();
+    _redraw();
+  };
+
+  els.campusImg.onerror = () => {
+    _toast('Failed to load image', 'error');
+  };
+
+  els.campusImg.src = mapImageUrl;
+}
+
+els.btnLoadImage.addEventListener('click', () => els.fileInput.click());
+els.btnDropPick.addEventListener('click',  () => els.fileInput.click());
+
+els.fileInput.addEventListener('change', () => {
+  if (els.fileInput.files[0]) _loadImage(els.fileInput.files[0]);
+  els.fileInput.value = '';
+});
+
+// Drag-and-drop onto the canvas area
+const canvasArea = document.getElementById('canvas-area');
+canvasArea.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  els.dropZone.classList.add('dragover');
+});
+canvasArea.addEventListener('dragleave', () => {
+  els.dropZone.classList.remove('dragover');
+});
+canvasArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  els.dropZone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) _loadImage(file);
+});
+
+// ── Canvas Sizing ─────────────────────────────────────────────────────
+
+function _syncCanvas() {
+  const rect = els.campusImg.getBoundingClientRect();
+  els.pinCanvas.width  = rect.width;
+  els.pinCanvas.height = rect.height;
+}
+
+new ResizeObserver(() => {
+  if (els.campusImg.style.display !== 'none') {
+    _syncCanvas();
+    _redraw();
+  }
+}).observe(els.campusImg);
+
+// ── Canvas Coordinate Helpers ─────────────────────────────────────────
+
+/**
+ * Get the rendered image rect within the canvas, accounting for
+ * object-fit: contain letterboxing.
+ *
+ * @returns {{ left: number, top: number, width: number, height: number }|null}
+ */
+function _getImageRect() {
+  const img = els.campusImg;
+  if (!img.naturalWidth || !img.naturalHeight) return null;
+
+  const cw    = els.pinCanvas.width;
+  const ch    = els.pinCanvas.height;
+  const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
+  const rw    = img.naturalWidth  * scale;
+  const rh    = img.naturalHeight * scale;
+
+  return {
+    left:   (cw - rw) / 2,
+    top:    (ch - rh) / 2,
+    width:  rw,
+    height: rh,
+  };
+}
+
+/**
+ * Convert a mouse event position to normalised image coordinates.
+ *
+ * @param {MouseEvent} e
+ * @returns {{ x: number, y: number }|null}
+ */
+function _eventToNorm(e) {
+  const rect = els.pinCanvas.getBoundingClientRect();
+  const rawX = e.clientX - rect.left;
+  const rawY = e.clientY - rect.top;
+
+  const ir = _getImageRect();
+  if (!ir) return null;
+
+  // Reject clicks outside image bounds
+  if (rawX < ir.left || rawX > ir.left + ir.width  ||
+      rawY < ir.top  || rawY > ir.top  + ir.height) {
+    return null;
+  }
+
+  return {
+    x: _round((rawX - ir.left) / ir.width,  6),
+    y: _round((rawY - ir.top)  / ir.height, 6),
+  };
+}
+
+/**
+ * Convert normalised coords to canvas pixel coords.
+ *
+ * @param {number} nx
+ * @param {number} ny
+ * @returns {{ x: number, y: number }|null}
+ */
+function _normToPixel(nx, ny) {
+  const ir = _getImageRect();
+  if (!ir) return null;
+  return {
+    x: ir.left + nx * ir.width,
+    y: ir.top  + ny * ir.height,
+  };
+}
+
+// ── Canvas Events ─────────────────────────────────────────────────────
+
+els.pinCanvas.addEventListener('click', (e) => {
+  const norm = _eventToNorm(e);
+  if (!norm) return;
+
+  pendingCoord = norm;
+  _updateCoordDisplay(norm.x, norm.y);
+  _updateJsonPreview();
+  _redraw();
+});
+
+els.pinCanvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  pendingCoord = null;
+  _clearCoordDisplay();
+  _updateJsonPreview();
+  _redraw();
+});
+
+els.pinCanvas.addEventListener('mousemove', (e) => {
+  const norm = _eventToNorm(e);
+  canvasHoverCoord = norm;
+  _redraw();
+
+  if (norm) {
+    els.crosshairInfo.textContent =
+      `x: ${norm.x.toFixed(4)}  y: ${norm.y.toFixed(4)}`;
+  } else {
+    els.crosshairInfo.textContent = 'Hover over the map to preview';
+  }
+});
+
+els.pinCanvas.addEventListener('mouseleave', () => {
+  canvasHoverCoord = null;
+  _redraw();
+  els.crosshairInfo.textContent = 'Hover over the map to preview';
+});
+
+// ── Canvas Drawing ────────────────────────────────────────────────────
+
+function _redraw() {
+  const canvas = els.pinCanvas;
+  const ctx    = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const ir = _getImageRect();
+  if (!ir) return;
+
+  // Letterbox mask
+  _drawMask(ctx, canvas, ir);
+
+  // Crosshair at hover position
+  if (canvasHoverCoord && !pendingCoord) {
+    const px = _normToPixel(canvasHoverCoord.x, canvasHoverCoord.y);
+    if (px) _drawCrosshair(ctx, px.x, px.y, ir);
+  }
+
+  // Placed pin
+  if (pendingCoord) {
+    const px = _normToPixel(pendingCoord.x, pendingCoord.y);
+    if (px) _drawPin(ctx, px.x, px.y);
+  }
+
+  // Existing saved pins for ALL rounds (faint, for context)
+  rounds.forEach((r) => {
+    if (r.x !== null && r.y !== null && r.id !== activeRoundId) {
+      const px = _normToPixel(r.x, r.y);
+      if (px) _drawGhostPin(ctx, px.x, px.y, r.label || r.id);
+    }
+  });
+}
+
+function _drawMask(ctx, canvas, ir) {
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  if (ir.top > 0)
+    ctx.fillRect(0, 0, canvas.width, ir.top);
+  if (ir.top + ir.height < canvas.height)
+    ctx.fillRect(0, ir.top + ir.height, canvas.width, canvas.height - ir.top - ir.height);
+  if (ir.left > 0)
+    ctx.fillRect(0, ir.top, ir.left, ir.height);
+  if (ir.left + ir.width < canvas.width)
+    ctx.fillRect(ir.left + ir.width, ir.top, canvas.width - ir.left - ir.width, ir.height);
+}
+
+function _drawCrosshair(ctx, x, y, ir) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(200,241,53,0.5)';
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([4, 4]);
+
+  // Horizontal line across image
+  ctx.beginPath();
+  ctx.moveTo(ir.left, y);
+  ctx.lineTo(ir.left + ir.width, y);
+  ctx.stroke();
+
+  // Vertical line across image
+  ctx.beginPath();
+  ctx.moveTo(x, ir.top);
+  ctx.lineTo(x, ir.top + ir.height);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+function _drawPin(ctx, x, y) {
+  // Outer glow
+  ctx.beginPath();
+  ctx.arc(x, y, 16, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(200,241,53,0.15)';
+  ctx.fill();
+
+  // White ring
+  ctx.beginPath();
+  ctx.arc(x, y, 10, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fill();
+
+  // Accent fill
+  ctx.beginPath();
+  ctx.arc(x, y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = '#C8F135';
+  ctx.fill();
+
+  // Label
+  ctx.font         = '600 11px Inter, sans-serif';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle    = 'rgba(0,0,0,0.7)';
+  const label      = _getActiveRound()?.label || 'Answer';
+  const tw         = ctx.measureText(label).width + 10;
+  _roundRect(ctx, x - tw / 2, y - 26, tw, 16, 4);
+  ctx.fill();
+  ctx.fillStyle = '#C8F135';
+  ctx.fillText(label, x, y - 12);
+}
+
+function _drawGhostPin(ctx, x, y, label) {
+  // Faint pin for already-set rounds (context only)
+  ctx.beginPath();
+  ctx.arc(x, y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(74,158,255,0.5)';
+  ctx.fill();
+
+  ctx.font         = '500 10px Inter, sans-serif';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle    = 'rgba(74,158,255,0.6)';
+  ctx.fillText(label, x, y - 8);
+}
+
+function _roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y,     x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x,     y + h, x,     y + h - r);
+  ctx.lineTo(x,     y + r);
+  ctx.quadraticCurveTo(x,     y,     x + r, y);
+  ctx.closePath();
+}
+
+// ── Coord Display ─────────────────────────────────────────────────────
+
+function _updateCoordDisplay(x, y) {
+  els.coordX.textContent = x.toFixed(6);
+  els.coordY.textContent = y.toFixed(6);
+  els.coordX.classList.remove('unset');
+  els.coordY.classList.remove('unset');
+}
+
+function _clearCoordDisplay() {
+  els.coordX.textContent = '—';
+  els.coordY.textContent = '—';
+  els.coordX.classList.add('unset');
+  els.coordY.classList.add('unset');
+}
+
+// ── Round Select ──────────────────────────────────────────────────────
+
+function _populateSelect() {
+  const prev = els.selectRound.value;
+  els.selectRound.innerHTML = '<option value="">— select a round —</option>';
+
+  rounds.forEach((r) => {
+    const opt = document.createElement('option');
+    opt.value       = r.id;
+    opt.textContent = `[${r.id}] ${r.label || '(unlabelled)'}`;
+    els.selectRound.appendChild(opt);
+  });
+
+  if (prev && rounds.find((r) => r.id === prev)) {
+    els.selectRound.value = prev;
+  }
+}
+
+els.selectRound.addEventListener('change', () => {
+  activeRoundId = els.selectRound.value || null;
+  _loadRoundIntoEditor(activeRoundId);
+});
+
+function _loadRoundIntoEditor(id) {
+  const round = rounds.find((r) => r.id === id);
+  if (!round) {
+    // Clear editor
+    els.inputLabel.value    = '';
+    els.inputPhoto.value    = '';
+    els.inputHint.value     = '';
+    els.inputDuration.value = '';
+    pendingCoord            = null;
+    _clearCoordDisplay();
+    _updateJsonPreview();
+    _redraw();
+    return;
+  }
+
+  els.inputLabel.value    = round.label    ?? '';
+  els.inputPhoto.value    = round.photoUrl ?? '';
+  els.inputHint.value     = round.locationHint ?? '';
+  els.inputDuration.value = round.durationMs   ?? '';
+
+  if (round.x !== null && round.y !== null) {
+    pendingCoord = { x: round.x, y: round.y };
+    _updateCoordDisplay(round.x, round.y);
+  } else {
+    pendingCoord = null;
+    _clearCoordDisplay();
+  }
+
+  _updateJsonPreview();
+  _redraw();
+}
+
+// ── Save Round ────────────────────────────────────────────────────────
+
+els.btnSaveRound.addEventListener('click', () => {
+  if (!activeRoundId) {
+    _toast('Select a round first', 'error');
+    return;
+  }
+
+  const round = rounds.find((r) => r.id === activeRoundId);
+  if (!round) return;
+
+  // Validate coord
+  if (!pendingCoord) {
+    _toast('Click the map to place the answer pin first', 'error');
+    return;
+  }
+
+  round.label        = els.inputLabel.value.trim()    || round.label;
+  round.photoUrl     = els.inputPhoto.value.trim()    || round.photoUrl;
+  round.locationHint = els.inputHint.value.trim()     || undefined;
+  round.durationMs   = els.inputDuration.value
+    ? parseInt(els.inputDuration.value, 10)
+    : undefined;
+  round.x = pendingCoord.x;
+  round.y = pendingCoord.y;
+
+  // Remove undefined keys
+  Object.keys(round).forEach((k) => round[k] === undefined && delete round[k]);
+
+  _toast(`Saved "${round.label || round.id}"`, 'success');
+  _populateSelect();
+  _updateJsonPreview();
+  _renderRoundsList();
+});
+
+// ── Clear Pin ─────────────────────────────────────────────────────────
+
+els.btnClearPin.addEventListener('click', () => {
+  pendingCoord = null;
+  _clearCoordDisplay();
+  _updateJsonPreview();
+  _redraw();
+});
+
+// ── JSON Preview ──────────────────────────────────────────────────────
+
+function _updateJsonPreview() {
+  const round = rounds.find((r) => r.id === activeRoundId);
+
+  if (!round) {
+    els.jsonOutput.innerHTML = '<span style="color:var(--text-secondary)">Select a round to preview its JSON</span>';
+    return;
+  }
+
+  const preview = { ...round };
+  if (pendingCoord) {
+    preview.x = pendingCoord.x;
+    preview.y = pendingCoord.y;
+  }
+
+  els.jsonOutput.innerHTML = _syntaxHighlight(JSON.stringify(preview, null, 2));
+}
+
+/**
+ * Basic JSON syntax highlighter.
+ *
+ * @param {string} json
+ * @returns {string}  HTML string
+ */
+function _syntaxHighlight(json) {
+  return json
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(
+      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      (match) => {
+        let cls = 'json-number';
+        if (/^"/.test(match)) {
+          cls = /:$/.test(match) ? 'json-key' : 'json-string';
+        } else if (/true|false/.test(match)) {
+          cls = 'json-string';
+        } else if (/null/.test(match)) {
+          cls = 'json-null';
+        }
+        return `<span class="${cls}">${match}</span>`;
+      }
+    );
+}
+
+// ── Rounds List Tab ───────────────────────────────────────────────────
+
+function _renderRoundsList() {
+  els.roundsList.innerHTML = '';
+
+  if (rounds.length === 0) {
+    els.roundsList.innerHTML =
+      '<p style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">No campus rounds yet. Add one below.</p>';
+    return;
+  }
+
+  rounds.forEach((r) => {
+    const hasCoord = r.x !== null && r.y !== null;
+    const item = document.createElement('div');
+    item.className = `round-list-item${r.id === activeRoundId ? ' selected' : ''}`;
+    item.innerHTML = `
+      <span class="rli-chip campus">campus</span>
+      <span class="rli-label">${_esc(r.label || r.id)}</span>
+      <span class="rli-status ${hasCoord ? 'ok' : 'missing'}">
+        ${hasCoord ? '✓ pinned' : '✗ no pin'}
+      </span>
+    `;
+    item.addEventListener('click', () => {
+      activeRoundId = r.id;
+      els.selectRound.value = r.id;
+      _loadRoundIntoEditor(r.id);
+      // Switch to pin tab
+      document.querySelector('.tab[data-tab="pin"]').click();
+    });
+    els.roundsList.appendChild(item);
+  });
+}
+
+// ── Add Round Modal ───────────────────────────────────────────────────
+
+els.btnAddRound.addEventListener('click', () => {
+  els.modalId.value    = `c${String(rounds.length + 1).padStart(2, '0')}`;
+  els.modalLabel.value = `Campus Round ${rounds.length + 1}`;
+  els.modalPhoto.value = '';
+  els.modalOverlay.classList.add('open');
+  setTimeout(() => els.modalId.focus(), 50);
+});
+
+els.btnModalCancel.addEventListener('click', () => {
+  els.modalOverlay.classList.remove('open');
+});
+
+els.btnModalConfirm.addEventListener('click', () => {
+  const id    = els.modalId.value.trim();
+  const label = els.modalLabel.value.trim();
+  const photo = els.modalPhoto.value.trim();
+
+  if (!id) { _toast('Round ID is required', 'error'); return; }
+  if (rounds.find((r) => r.id === id)) {
+    _toast(`ID "${id}" already exists`, 'error');
+    return;
+  }
+
+  /** @type {CampusRound} */
+  const newRound = {
+    id,
+    type:     'campus',
+    label:    label || `Campus Round ${rounds.length + 1}`,
+    photoUrl: photo || '',
+    x:        null,
+    y:        null,
+  };
+
+  rounds.push(newRound);
+  els.modalOverlay.classList.remove('open');
+
+  _populateSelect();
+  _renderRoundsList();
+
+  // Switch to this round in editor
+  activeRoundId         = id;
+  els.selectRound.value = id;
+  _loadRoundIntoEditor(id);
+  document.querySelector('.tab[data-tab="pin"]').click();
+
+  _toast(`Added round "${newRound.label}"`, 'success');
+});
+
+// Close modal on overlay click
+els.modalOverlay.addEventListener('click', (e) => {
+  if (e.target === els.modalOverlay) els.modalOverlay.classList.remove('open');
+});
+
+// ── Export ────────────────────────────────────────────────────────────
+
+function _exportJson() {
+  // Clean up rounds before export: remove null x/y if not set
+  const exportable = rounds.map((r) => {
+    const out = { ...r };
+    if (out.x === null) delete out.x;
+    if (out.y === null) delete out.y;
+    if (!out.locationHint) delete out.locationHint;
+    if (!out.durationMs)   delete out.durationMs;
+    return out;
+  });
+
+  const unpinned = exportable.filter((r) => r.x === undefined).length;
+  if (unpinned > 0) {
+    if (!confirm(`${unpinned} round(s) have no pin set. Export anyway?`)) return;
+  }
+
+  const json = JSON.stringify(exportable, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'campusRounds.json';
+  a.click();
+  URL.revokeObjectURL(url);
+
+  _toast('Exported campusRounds.json', 'success');
+}
+
+els.btnExportAll.addEventListener('click',  _exportJson);
+els.btnExportList.addEventListener('click', _exportJson);
+
+// ── Import existing campusRounds.json ────────────────────────────────
+
+/**
+ * On load, try to fetch the existing campusRounds.json from the server
+ * so the editor starts pre-populated rather than empty.
+ */
+async function _tryLoadExisting() {
+  try {
+    const res  = await fetch('/campusRounds.json');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!Array.isArray(data)) return;
+
+    rounds = data.map((r) => ({
+      ...r,
+      x: r.x ?? null,
+      y: r.y ?? null,
+    }));
+
+    _populateSelect();
+    _renderRoundsList();
+    _toast(`Loaded ${rounds.length} existing round(s) from server`, 'success');
+  } catch (_) {
+    // File doesn't exist yet — that's fine, start blank
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+function _round(v, decimals) {
+  return Number(v.toFixed(decimals));
+}
+
+function _esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function _toast(message, type = 'default', durationMs = 3000) {
+  // Re-use the same toast container from style.css
+  let container = document.querySelector('.toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  const el = document.createElement('div');
+  el.className = `toast${type === 'error' ? ' toast-error' : type === 'success' ? ' toast-success' : ''}`;
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), durationMs);
+}
+
+function _getActiveRound() {
+  return rounds.find((r) => r.id === activeRoundId) ?? null;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
+
+_tryLoadExisting();
+</script>
+</body>
+</html>

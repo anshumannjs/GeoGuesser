@@ -1,0 +1,20 @@
+[
+  {
+    "id": "c01",
+    "type": "campus",
+    "label": "Campus Round 1",
+    "photoUrl": "/photos/campus/c01.jpg",
+    "x": 0.42,
+    "y": 0.58,
+    "locationHint": "Central Library Courtyard"
+  },
+  {
+    "id": "c02",
+    "type": "campus",
+    "label": "Campus Round 2",
+    "photoUrl": "/photos/campus/c02.jpg",
+    "x": 0.71,
+    "y": 0.33,
+    "locationHint": "Engineering Block Entrance"
+  }
+]
