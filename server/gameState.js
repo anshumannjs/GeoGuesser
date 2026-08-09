@@ -82,10 +82,10 @@ function _getSession(roomCode) {
  */
 function _createSession(roomCode) {
   const sequence = buildRoundSequence(_worldRounds, _campusRounds, {
-    maxWorldRounds:  6,
-    maxCampusRounds: 4,
+    maxWorldRounds:  10,
+    maxCampusRounds: 0,
     shuffleCampus:   true,
-    shuffleWorld:    false,
+    shuffleWorld:    true,
   });
 
   /** @type {GameSession} */
@@ -531,12 +531,26 @@ function submitGuess(roomCode, playerId, coord, io) {
   return { accepted: true, guessCount, totalPlayers };
 }
 
+/**
+ * Get the current session for a room without throwing.
+ * Used by socketHandlers for reconnection resyncing.
+ *
+ * @param {string} roomCode
+ * @returns {GameSession|null}
+ */
+function getSession(roomCode) {
+  return sessions.get(roomCode) ?? null;
+}
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
+
+// Add to exports
 module.exports = {
   initialise,
   startGame,
   submitGuess,
   hostAdvance,
   destroySession,
+  getSession,     // ← add this
 };

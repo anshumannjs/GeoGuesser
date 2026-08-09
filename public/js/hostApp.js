@@ -15,16 +15,19 @@ const HostApp = (() => {
 
   // ── State ──────────────────────────────────────────────────────────────────
 
+  // Track whether this is the first connection or a reconnection
+  let _hasConnectedBefore = false;
+
   const state = {
-    roomCode:      null,
-    playerId:      null,
-    totalRounds:   0,
-    roundIndex:    -1,
-    currentRound:  null,
+    roomCode: null,
+    playerId: null,
+    totalRounds: 0,
+    roundIndex: -1,
+    currentRound: null,
     timerInterval: null,
-    roundEndsAt:   0,
+    roundEndsAt: 0,
     roundDurationMs: 0,
-    totalPlayers:  0,
+    totalPlayers: 0,
   };
 
   // ── DOM Refs ───────────────────────────────────────────────────────────────
@@ -32,57 +35,57 @@ const HostApp = (() => {
   const $ = (id) => document.getElementById(id);
 
   const screens = {
-    lobby:       $('screen-lobby'),
-    countdown:   $('screen-countdown'),
-    round:       $('screen-round'),
-    reveal:      $('screen-reveal'),
+    lobby: $('screen-lobby'),
+    countdown: $('screen-countdown'),
+    round: $('screen-round'),
+    reveal: $('screen-reveal'),
     leaderboard: $('screen-leaderboard'),
-    gameover:    $('screen-gameover'),
+    gameover: $('screen-gameover'),
   };
 
   const els = {
     // Lobby
-    lobbyCode:        $('lobby-code'),
-    lobbyJoinUrl:     $('lobby-join-url'),
-    lobbyPlayerGrid:  $('lobby-player-grid'),
+    lobbyCode: $('lobby-code'),
+    lobbyJoinUrl: $('lobby-join-url'),
+    lobbyPlayerGrid: $('lobby-player-grid'),
     lobbyPlayerCount: $('lobby-player-count'),
-    btnStart:         $('btn-start'),
+    btnStart: $('btn-start'),
 
     // Countdown
-    countdownNumber:  $('host-countdown-number'),
-    countdownLabel:   $('host-countdown-label'),
+    countdownNumber: $('host-countdown-number'),
+    countdownLabel: $('host-countdown-label'),
 
     // Round
-    panoRoundLabel:   $('pano-round-label'),
-    panoRoundTitle:   $('pano-round-title'),
-    hostRoundChip:    $('host-round-chip'),
-    hostTimerDigit:   $('host-timer-digit'),
-    hostTimerBar:     $('host-timer-bar'),
-    hostGuessCount:   $('host-guess-count'),
-    hostGuessTotal:   $('host-guess-total'),
-    hostGuessBar:     $('host-guess-bar'),
+    panoRoundLabel: $('pano-round-label'),
+    panoRoundTitle: $('pano-round-title'),
+    hostRoundChip: $('host-round-chip'),
+    hostTimerDigit: $('host-timer-digit'),
+    hostTimerBar: $('host-timer-bar'),
+    hostGuessCount: $('host-guess-count'),
+    hostGuessTotal: $('host-guess-total'),
+    hostGuessBar: $('host-guess-bar'),
     hostWorldMiniMap: $('host-world-mini-map'),
-    hostCampusMiniWrap:$('host-campus-mini-wrap'),
+    hostCampusMiniWrap: $('host-campus-mini-wrap'),
     hostCampusMiniImg: $('host-campus-mini-img'),
     hostCampusMiniCanvas: $('host-campus-mini-canvas'),
     btnEndRoundEarly: $('btn-end-round-early'),
 
     // Reveal
-    revealRoundLabel:     $('reveal-round-label'),
-    revealLocationLabel:  $('reveal-location-label'),
-    revealNextBtn:        $('reveal-next-btn'),
-    revealPodiumList:     $('reveal-podium-list'),
-    revealStats:          $('reveal-stats'),
-    hostRevealWorldMap:   $('host-reveal-world-map'),
+    revealRoundLabel: $('reveal-round-label'),
+    revealLocationLabel: $('reveal-location-label'),
+    revealNextBtn: $('reveal-next-btn'),
+    revealPodiumList: $('reveal-podium-list'),
+    revealStats: $('reveal-stats'),
+    hostRevealWorldMap: $('host-reveal-world-map'),
     hostRevealCampusWrap: $('host-reveal-campus-wrap'),
-    hostRevealCampusImg:  $('host-reveal-campus-img'),
+    hostRevealCampusImg: $('host-reveal-campus-img'),
     hostRevealCampusCanvas: $('host-reveal-campus-canvas'),
 
     // Leaderboard
-    lbTitle:      $('lb-title'),
-    lbSubtitle:   $('lb-subtitle'),
-    lbList:       $('host-lb-list'),
-    lbNextBtn:    $('lb-next-btn'),
+    lbTitle: $('lb-title'),
+    lbSubtitle: $('lb-subtitle'),
+    lbList: $('host-lb-list'),
+    lbNextBtn: $('lb-next-btn'),
 
     // Game Over
     gameoverPodium: $('gameover-podium-wrap'),
@@ -100,6 +103,25 @@ const HostApp = (() => {
     Object.entries(screens).forEach(([key, el]) => {
       el.style.display = key === name ? 'flex' : 'none';
     });
+  }
+
+  /**
+ * Show a temporary "reconnecting" screen while waiting for the next
+ * server broadcast to resync the host display to the current game state.
+ *
+ * @param {string} currentState  GAME_STATE value
+ */
+  function _showResyncScreen(currentState) {
+    // We don't have enough info to fully rebuild the current screen,
+    // but the next server event (S_ROUND_START, S_ROUND_REVEAL, etc)
+    // will arrive shortly and update the display correctly.
+    // For now show a neutral holding screen.
+    Object.values(screens).forEach((el) => el.style.display = 'none');
+
+    // Reuse countdown screen as a holding state
+    els.countdownNumber.textContent = '↺';
+    els.countdownLabel.textContent = `Rejoined game — waiting for next event…`;
+    screens.countdown.style.display = 'flex';
   }
 
   // ── Toast ──────────────────────────────────────────────────────────────────
@@ -127,22 +149,22 @@ const HostApp = (() => {
    */
   function startTimer(endsAt, durationMs) {
     _clearTimer();
-    state.roundEndsAt     = endsAt;
+    state.roundEndsAt = endsAt;
     state.roundDurationMs = durationMs;
 
     function tick() {
       const remaining = Math.max(0, state.roundEndsAt - Date.now());
-      const secs      = Math.ceil(remaining / 1000);
-      const progress  = remaining / state.roundDurationMs;
+      const secs = Math.ceil(remaining / 1000);
+      const progress = remaining / state.roundDurationMs;
 
-      els.hostTimerDigit.textContent       = secs;
-      els.hostTimerBar.style.transform     = `scaleX(${progress})`;
+      els.hostTimerDigit.textContent = secs;
+      els.hostTimerBar.style.transform = `scaleX(${progress})`;
 
-      const isWarn   = secs <= 10 && secs > 5;
+      const isWarn = secs <= 10 && secs > 5;
       const isDanger = secs <= 5;
 
       [els.hostTimerDigit, els.hostTimerBar].forEach((el) => {
-        el.classList.toggle('warn',   isWarn);
+        el.classList.toggle('warn', isWarn);
         el.classList.toggle('danger', isDanger);
       });
 
@@ -179,7 +201,7 @@ const HostApp = (() => {
     els.lobbyPlayerGrid.innerHTML = '';
     nonHost.forEach((p) => {
       const chip = document.createElement('div');
-      chip.className   = 'lobby-player-chip';
+      chip.className = 'lobby-player-chip';
       chip.textContent = _escHtml(p.nickname);
       els.lobbyPlayerGrid.appendChild(chip);
     });
@@ -198,8 +220,8 @@ const HostApp = (() => {
    */
   function setupRound(round, roundIndex, totalRounds, durationMs, endsAt) {
     state.currentRound = round;
-    state.roundIndex   = roundIndex;
-    state.totalRounds  = totalRounds;
+    state.roundIndex = roundIndex;
+    state.totalRounds = totalRounds;
 
     const isWorld = round.type === ROUND_TYPE.WORLD;
 
@@ -210,7 +232,7 @@ const HostApp = (() => {
 
     // Round chip
     els.hostRoundChip.textContent = isWorld ? 'World' : 'Campus';
-    els.hostRoundChip.className   = `round-chip ${isWorld ? 'world' : 'campus'}`;
+    els.hostRoundChip.className = `round-chip ${isWorld ? 'world' : 'campus'}`;
 
     // Reset guess counter
     _updateGuessCounter(0, state.totalPlayers);
@@ -220,13 +242,13 @@ const HostApp = (() => {
 
     // Mini map in sidebar
     if (isWorld) {
-      els.hostWorldMiniMap.style.display   = 'block';
+      els.hostWorldMiniMap.style.display = 'block';
       els.hostCampusMiniWrap.style.display = 'none';
       WorldMapView.init('host-world-mini-map', null); // null = no pin callback; host doesn't guess
     } else {
-      els.hostWorldMiniMap.style.display   = 'none';
+      els.hostWorldMiniMap.style.display = 'none';
       els.hostCampusMiniWrap.style.display = 'flex';
-      els.hostCampusMiniImg.src            = round.photoUrl ?? '';
+      els.hostCampusMiniImg.src = round.photoUrl ?? '';
       // Sync mini canvas size once image loads
       els.hostCampusMiniImg.onload = () => {
         _syncMiniCanvas();
@@ -243,12 +265,24 @@ const HostApp = (() => {
    * Sync the campus mini-map canvas size to the image.
    */
   function _syncMiniCanvas() {
-    const img    = els.hostCampusMiniImg;
+    const img = els.hostCampusMiniImg;
     const canvas = els.hostCampusMiniCanvas;
-    const rect   = img.getBoundingClientRect();
+    const rect = img.getBoundingClientRect();
     if (rect.width > 0) {
-      canvas.width  = rect.width;
+      canvas.width = rect.width;
       canvas.height = rect.height;
+    }
+  }
+
+  // In hostApp.js — extracted so it can be called multiple times
+  async function _acquireWakeLock() {
+    if ('wakeLock' in navigator) {
+      try {
+        await navigator.wakeLock.request('screen');
+        console.info('[host] Wake lock acquired');
+      } catch (err) {
+        console.warn('[host] Wake lock failed:', err);
+      }
     }
   }
 
@@ -269,17 +303,17 @@ const HostApp = (() => {
       mapillaryEl.style.display = 'none';
       pannellumEl.style.display = 'block';
       if (window._hostPannellumViewer) {
-        try { window._hostPannellumViewer.destroy(); } catch (_) {}
+        try { window._hostPannellumViewer.destroy(); } catch (_) { }
       }
       window._hostPannellumViewer = window.pannellum.viewer('host-pannellum-viewer', {
-        type:         'equirectangular',
-        panorama:     round.photoUrl,
-        autoLoad:     true,
+        type: 'equirectangular',
+        panorama: round.photoUrl,
+        autoLoad: true,
         showControls: false, // host display is read-only
-        compass:      false,
-        mouseZoom:    false,
-        hfov:         100,
-        autoRotate:   -2, // slow auto-rotate for visual interest on projector
+        compass: false,
+        mouseZoom: false,
+        hfov: 100,
+        autoRotate: -2, // slow auto-rotate for visual interest on projector
       });
     }
   }
@@ -331,7 +365,7 @@ const HostApp = (() => {
     } = payload;
 
     // Top bar
-    els.revealRoundLabel.textContent   = roundLabel ?? '';
+    els.revealRoundLabel.textContent = roundLabel ?? '';
     els.revealLocationLabel.textContent = locationHint ?? '—';
 
     // Podium sidebar — top 3 guessers this round
@@ -342,7 +376,7 @@ const HostApp = (() => {
 
     // Map reveal
     if (roundType === ROUND_TYPE.WORLD) {
-      els.hostRevealWorldMap.style.display   = 'block';
+      els.hostRevealWorldMap.style.display = 'block';
       els.hostRevealCampusWrap.style.display = 'none';
       WorldMapView.renderReveal(
         'host-reveal-world-map',
@@ -351,9 +385,9 @@ const HostApp = (() => {
         null // no self-player on host display
       );
     } else {
-      els.hostRevealWorldMap.style.display   = 'none';
+      els.hostRevealWorldMap.style.display = 'none';
       els.hostRevealCampusWrap.style.display = 'flex';
-      els.hostRevealCampusImg.src            = state.currentRound?.photoUrl ?? '';
+      els.hostRevealCampusImg.src = state.currentRound?.photoUrl ?? '';
       CampusMapView.renderReveal(
         'host-reveal-campus-canvas',
         'host-reveal-campus-img',
@@ -407,18 +441,18 @@ const HostApp = (() => {
     els.revealStats.innerHTML = '';
 
     const guessCount = scores.length;
-    const noGuess    = noGuessList.length;
-    const bestDist   = scores.length > 0
+    const noGuess = noGuessList.length;
+    const bestDist = scores.length > 0
       ? scores.find((s) => s.rank === 1)?.distanceDisplay ?? '—'
       : '—';
-    const avgNorm    = scores.length > 0
+    const avgNorm = scores.length > 0
       ? scores.reduce((sum, s) => sum + s.distanceNorm, 0) / scores.length
       : null;
 
     const stats = [
       { label: 'Guesses submitted', value: `${guessCount}` },
-      { label: 'No guess',          value: `${noGuess}` },
-      { label: 'Best guess',        value: bestDist },
+      { label: 'No guess', value: `${noGuess}` },
+      { label: 'Best guess', value: bestDist },
     ];
 
     if (avgNorm !== null) {
@@ -451,7 +485,7 @@ const HostApp = (() => {
   function renderLeaderboard(payload) {
     const { players, roundIndex, totalRounds, isLastRound } = payload;
 
-    els.lbTitle.textContent    = isLastRound ? 'Final Standings' : 'Leaderboard';
+    els.lbTitle.textContent = isLastRound ? 'Final Standings' : 'Leaderboard';
     els.lbSubtitle.textContent =
       `After Round ${roundIndex + 1} of ${totalRounds}`;
 
@@ -465,7 +499,7 @@ const HostApp = (() => {
     els.lbList.innerHTML = '';
 
     players.forEach((p, i) => {
-      const pos    = i + 1;
+      const pos = i + 1;
       const isSelf = false; // host has no self
 
       const row = document.createElement('div');
@@ -545,17 +579,42 @@ const HostApp = (() => {
 
     // ── Connection ─────────────────────────────────────────────────────────
 
+    // _connected fires on EVERY connection including reconnects
     SocketClient.on('_connected', () => {
-      // Create room immediately on connect
-      SocketClient.createRoom('Host');
+      if (_hasConnectedBefore) {
+        // This is a reconnection — _reconnected handler below takes care of it
+        return;
+      }
+
+      // First connection only — create or rejoin room
+      _hasConnectedBefore = true;
+      const saved = SocketClient.getSavedSession();
+
+      if (saved.roomCode) {
+        console.info('[host] Found saved session — rejoining:', saved.roomCode);
+        SocketClient.joinRoom(saved.roomCode, 'Host');
+      } else {
+        SocketClient.createRoom('Host');
+      }
+    });
+
+    // _reconnected fires specifically after a dropped connection recovers
+    SocketClient.on('_reconnected', async () => {
+      // Re-acquire wake lock (browser releases it when tab goes background)
+      await _acquireWakeLock();
+
+      toast('Reconnected!', 'success');
+
+      const saved = SocketClient.getSavedSession();
+      if (saved.roomCode) {
+        SocketClient.joinRoom(saved.roomCode, 'Host');
+      } else {
+        toast('Reconnected but lost session — please refresh', 'error', 0);
+      }
     });
 
     SocketClient.on('_disconnected', () => {
       toast('Connection lost — reconnecting…', 'error', 8000);
-    });
-
-    SocketClient.on('_reconnected', () => {
-      toast('Reconnected!', 'success');
     });
 
     SocketClient.on('_reconnect_failed', () => {
@@ -565,22 +624,28 @@ const HostApp = (() => {
     // ── S_ROOM_JOINED ──────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_ROOM_JOINED, (payload) => {
-      const { roomCode, playerId, players } = payload;
+      const { roomCode, playerId, players, reconnected, gameState: gs } = payload;
 
       state.roomCode = roomCode;
       state.playerId = playerId;
 
       SocketClient.setSession(roomCode, playerId);
 
-      // Display room code and URL
-      els.lobbyCode.textContent    = roomCode;
-      els.lobbyJoinUrl.textContent = `${window.location.hostname}/play`;
-
-      updateLobbyPlayers(players);
-
-      // Cache nicknames
+      // Cache all player nicknames
       players.forEach((p) => _nicknameCache.set(p.id, p.nickname));
 
+      if (reconnected && gs && gs !== GAME_STATE.LOBBY) {
+        // Host reconnected mid-game — show a reconnecting screen
+        // and wait for the next server broadcast to resync display
+        toast('Reconnected to game in progress — resyncing…', 'success');
+        _showResyncScreen(gs);
+        return;
+      }
+
+      // Fresh join — show lobby as normal
+      els.lobbyCode.textContent = roomCode;
+      els.lobbyJoinUrl.textContent = `${window.location.hostname}/play`;
+      updateLobbyPlayers(players);
       showScreen('lobby');
     });
 
@@ -602,8 +667,8 @@ const HostApp = (() => {
       showScreen('countdown');
       els.countdownLabel.textContent = `${totalRounds} rounds — let's go!`;
 
-      const steps   = Math.ceil(countdownMs / 1000);
-      let   current = steps;
+      const steps = Math.ceil(countdownMs / 1000);
+      let current = steps;
 
       function tick() {
         els.countdownNumber.textContent = current;
@@ -681,11 +746,11 @@ const HostApp = (() => {
 
     // Start game
     els.btnStart.addEventListener('click', () => {
-      els.btnStart.disabled    = true;
+      els.btnStart.disabled = true;
       els.btnStart.textContent = 'Starting…';
       SocketClient.startGame();
       setTimeout(() => {
-        els.btnStart.disabled    = false;
+        els.btnStart.disabled = false;
         els.btnStart.textContent = 'Start Game';
       }, 4000);
     });
@@ -729,12 +794,19 @@ const HostApp = (() => {
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
-  function init() {
-    SocketClient.connect();
-    _wireEvents();
-    _wireDom();
-    // Host screen starts blank — room is created on socket connect
+  // Browser releases wake lock when tab goes hidden — re-acquire when it comes back
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible') {
+    await _acquireWakeLock();
   }
+});
+
+async function init() {
+  await _acquireWakeLock();
+  SocketClient.connect();
+  _wireEvents();
+  _wireDom();
+}
 
   return { init, toast };
 

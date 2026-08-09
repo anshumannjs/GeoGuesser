@@ -35,18 +35,29 @@ const WorldMapView = (() => {
    * Dark-styled tile layer from CartoDB — matches our dark UI theme.
    * Falls back to standard OSM if CartoDB is unavailable.
    */
-  const DARK_TILE = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  const DARK_TILE = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
   const DARK_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>';
 
   // ── Pin Colours ────────────────────────────────────────────────────────────
 
+  // For Dark Mode 
+  // const COLOURS = {
+  //   self: '#C8F135', // accent lime — player's own pin
+  //   correct: '#FF4D4D', // red — correct answer pin
+  //   top3: '#FFD166', // gold — top 3 guessers
+  //   other: '#4A9EFF', // blue — everyone else
+  //   offline: '#555555', // grey — disconnected player
+  // };
+
+  // For Light Mode
   const COLOURS = {
-    self: '#C8F135', // accent lime — player's own pin
-    correct: '#FF4D4D', // red — correct answer pin
-    top3: '#FFD166', // gold — top 3 guessers
-    other: '#4A9EFF', // blue — everyone else
-    offline: '#555555', // grey — disconnected player
-  };
+  self:    '#1a8c2e', // dark green — visible on white map
+  correct: '#FF4D4D',
+  top3:    '#cc8800', // darker gold — visible on white
+  other:   '#1a5eb8', // darker blue — visible on white
+  offline: '#999999',
+};
+
 
   // ── Active Round Map ───────────────────────────────────────────────────────
 

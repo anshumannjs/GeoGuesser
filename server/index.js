@@ -164,12 +164,15 @@ const io = new Server(server, {
   },
   // Tune transport for a controlled LAN/event environment
   transports: ['websocket', 'polling'], // websocket first, polling as fallback
-  pingTimeout: 20_000,
-  pingInterval: 10_000,
+  // pingTimeout: 20_000,
+  // pingInterval: 10_000,
+  pingTimeout:  60_000,   // was 20_000 — give 60s before declaring disconnect
+  pingInterval: 15_000,   // was 10_000 — ping less frequently
   maxHttpBufferSize: 32 * 1024, // 32 KB max per event payload
   connectionStateRecovery: {
     // Allow clients to recover missed events after a brief disconnect
-    maxDisconnectionDuration: 30_000, // 30 seconds
+    // maxDisconnectionDuration: 30_000, // 30 seconds
+    maxDisconnectionDuration: 60_000, // was 30_000
     skipMiddlewares: false,
   },
 });

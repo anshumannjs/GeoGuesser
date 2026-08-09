@@ -267,31 +267,36 @@ function registerSocketHandlers(io) {
         const reconnected = rooms.reconnectPlayer(roomCode, socket.id, nickname);
 
         if (reconnected) {
-          const { room, player } = reconnected;
-          socket.join(roomCode);
+  const { room, player } = reconnected;
+  socket.join(roomCode);
 
-          // Send them back their current game state so they can re-render
-          const currentRoom = rooms.getRoom(roomCode);
-          socket.emit(EVENTS.S_ROOM_JOINED, {
-            roomCode,
-            playerId:    player.id,
-            role:        player.role,
-            players:     rooms.getPlayerSnapshot(roomCode),
-            reconnected: true,
-            gameState:   currentRoom.state,
-          });
+  // Get current game session info if game is active
+  let currentRoundPayload = null;
+  try {
+    const session = gameState.getSession(roomCode); // we'll add this getter
+    if (session && session.currentIndex >= 0) {
+      const round = session.sequence[session.currentIndex];
+      currentRoundPayload = {
+        round:       sanitiseRoundForClient(round),
+        roundIndex:  session.currentIndex,
+        totalRounds: session.sequence.length,
+        endsAt:      session.roundEndsAt,
+        durationMs:  session.roundDurationMs ?? 0,
+      };
+    }
+  } catch (_) {}
 
-          // Notify others that this player is back
-          socket.to(roomCode).emit(EVENTS.S_ROOM_PLAYERS, {
-            players: rooms.getPlayerSnapshot(roomCode),
-          });
-
-          logger.info(
-            { roomCode, playerId: player.id, nickname },
-            'Player reconnected via C_JOIN'
-          );
-          return;
-        }
+  socket.emit(EVENTS.S_ROOM_JOINED, {
+    roomCode,
+    playerId:            player.id,
+    role:                player.role,
+    players:             rooms.getPlayerSnapshot(roomCode),
+    reconnected:         true,
+    gameState:           currentRoom.state,
+    currentRoundPayload, // ← send current round so host can resync
+  });
+  return;
+}
 
         // ── Fresh join ───────────────────────────────────────────────
 
