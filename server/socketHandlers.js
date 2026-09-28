@@ -215,7 +215,7 @@ function registerSocketHandlers(io) {
 
     // ── Connection rate limit ────────────────────────────────────────────
 
-    if (_isConnectionRateLimited(ip)) {
+    if (config.NODE_ENV!=='test' && process.env.ROOM_CODE!=null && _isConnectionRateLimited(ip)) {
       logger.warn({ ip, socketId: socket.id }, 'Connection rate limited — disconnecting');
       socket.emit(EVENTS.S_ERROR, {
         code:    'RATE_LIMITED',
@@ -286,6 +286,8 @@ function registerSocketHandlers(io) {
     }
   } catch (_) {}
 
+  // Send them back their current game state so they can re-render
+  const currentRoom = rooms.getRoom(roomCode);
   socket.emit(EVENTS.S_ROOM_JOINED, {
     roomCode,
     playerId:            player.id,

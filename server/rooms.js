@@ -132,7 +132,7 @@ function createRoom(hostSocketId, hostNickname) {
  * @returns {{ room: Room, player: Player }}
  */
 function joinRoom(roomCode, socketId, nickname) {
-  const room = _getRoom(roomCode);
+  const room = _getRoom(roomCode); 
   const trimmedNick = nickname.trim();
 
   // ── Guards ────────────────────────────────────────────────────────────────

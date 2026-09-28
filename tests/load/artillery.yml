@@ -1,0 +1,56 @@
+config:
+  target: "http://localhost:3000"
+  phases:
+    # Ramp up: 0 → 20 players over 10s
+    - duration: 10
+      arrivalRate: 2
+      name: "Ramp up"
+    # Sustained: 20 players/sec for 30s (simulates event peak)
+    - duration: 30
+      arrivalRate: 20
+      name: "Peak load"
+    # Cool down
+    - duration: 10
+      arrivalRate: 2
+      name: "Cool down"
+  engines:
+    socketio:
+      transports:
+        - websocket
+  processor: "./scenarios/fullGame.js"
+
+scenarios:
+  - name: "Player joins and guesses"
+    engine: socketio
+    flow:
+      - emit:
+          channel: "c:join"
+          data:
+            roomCode: "{{ $processEnvironment.TEST_ROOM_CODE }}"
+            nickname: "Player_{{ $randomString() }}"
+      - wait:
+          channel: "s:room:joined"
+          timeout: 5000
+
+      - wait:
+          channel: "s:round:start"
+          timeout: 60000
+
+      - think: 5  # simulate thinking time
+
+      - function: "submitGuess"
+
+      - wait:
+          channel: "s:guess:ack"
+          timeout: 5000
+
+      - wait:
+          channel: "s:round:reveal"
+          timeout: 60000
+
+  - name: "Health check"
+    flow:
+      - get:
+          url: "/health"
+          expect:
+            - statusCode: 200

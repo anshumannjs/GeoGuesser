@@ -8,7 +8,7 @@ const envSchema = z.object({
     .default('development'),
   PORT: z.coerce.number().int().min(1024).max(65535).default(3000),
   LOG_LEVEL: z
-    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
+    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
     .default('info'),
 
   // Mapillary client token (required for world round Street View)
