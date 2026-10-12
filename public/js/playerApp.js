@@ -2,32 +2,30 @@
  * playerApp.js
  * Main orchestrator for the player view.
  *
- * Responsibilities:
- *  - Screen lifecycle (showScreen)
- *  - Wiring all server → client socket events to UI updates
- *  - Timer rendering (bar + digit)
- *  - Guess submission coordination
- *  - Leaderboard and reveal rendering
- *  - Toast notifications
+ * Key changes from previous version:
+ *  - Auto-rejoin on page load via C_REJOIN (no form re-entry needed)
+ *  - Nickname saved to sessionStorage so it survives refresh
+ *  - S_GAME_STATE_SYNC handler snaps player to correct screen mid-game
+ *  - Timer is purely driven by S_ROUND_TICK (no local drift)
  */
 
-/* global SocketClient, EVENTS, GAME_STATE, ROUND_TYPE, WorldMapView, CampusMapView */
+/* global SocketClient, EVENTS, GAME_STATE, ROUND_TYPE, ROLE, SESSION_KEYS, WorldMapView, CampusMapView */
 
 const PlayerApp = (() => {
 
-  // ── Session state ──────────────────────────────────────────────────────────
+  // ── State ──────────────────────────────────────────────────────────────────
 
   const state = {
-    nickname:     null,
-    roomCode:     null,
-    playerId:     null,
-    role:         null,
-    currentRound: null,   // round object (client-safe, no answer coords)
-    roundIndex:   -1,
-    totalRounds:  0,
-    guessSubmitted: false,
-    pendingCoord:   null, // coord staged but not yet confirmed
-    timerInterval:  null,
+    nickname:        null,
+    roomCode:        null,
+    playerId:        null,
+    role:            null,
+    currentRound:    null,
+    roundIndex:      -1,
+    totalRounds:     0,
+    guessSubmitted:  false,
+    pendingCoord:    null,
+    timerInterval:   null,
     roundDurationMs: 0,
     roundEndsAt:     0,
   };
@@ -48,51 +46,51 @@ const PlayerApp = (() => {
 
   const els = {
     // Lobby
-    inputCode:       $('input-code'),
-    inputNick:       $('input-nick'),
-    btnJoin:         $('btn-join'),
-    joinError:       $('join-error'),
+    inputCode:         $('input-code'),
+    inputNick:         $('input-nick'),
+    btnJoin:           $('btn-join'),
+    joinError:         $('join-error'),
 
     // Waiting
-    waitingCount:    $('waiting-player-count'),
-    waitingNick:     $('waiting-nick-badge'),
+    waitingCount:      $('waiting-player-count'),
+    waitingNick:       $('waiting-nick-badge'),
 
     // Countdown
-    countdownNumber: $('countdown-number'),
-    countdownLabel:  $('countdown-label'),
+    countdownNumber:   $('countdown-number'),
+    countdownLabel:    $('countdown-label'),
 
     // Round
-    roundChip:       $('round-chip'),
-    timerDigit:      $('timer-digit'),
-    timerBar:        $('timer-bar'),
-    guessStatus:     $('guess-status'),
-    guessPill:       $('guess-pill'),
-    btnSubmit:       $('btn-submit-guess'),
-    submittedOverlay:$('submitted-overlay'),
-    worldMap:        $('world-map'),
-    campusMapWrap:   $('campus-map-wrap'),
+    roundChip:         $('round-chip'),
+    timerDigit:        $('timer-digit'),
+    timerBar:          $('timer-bar'),
+    guessStatus:       $('guess-status'),
+    guessPill:         $('guess-pill'),
+    btnSubmit:         $('btn-submit-guess'),
+    submittedOverlay:  $('submitted-overlay'),
+    worldMap:          $('world-map'),
+    campusMapWrap:     $('campus-map-wrap'),
 
     // Reveal
-    revealRoundLabel:  $('reveal-round-label'),
-    revealLocation:    $('reveal-location'),
-    revealDistance:    $('reveal-distance'),
-    revealPointsBadge: $('reveal-points-badge'),
-    revealRankBadge:   $('reveal-rank-badge'),
-    revealWorldMap:    $('reveal-world-map'),
-    revealCampusWrap:  $('reveal-campus-wrap'),
-    revealCampusImg:   $('reveal-campus-img'),
-    revealCampusCanvas:$('reveal-campus-canvas'),
+    revealRoundLabel:   $('reveal-round-label'),
+    revealLocation:     $('reveal-location'),
+    revealDistance:     $('reveal-distance'),
+    revealPointsBadge:  $('reveal-points-badge'),
+    revealRankBadge:    $('reveal-rank-badge'),
+    revealWorldMap:     $('reveal-world-map'),
+    revealCampusWrap:   $('reveal-campus-wrap'),
+    revealCampusImg:    $('reveal-campus-img'),
+    revealCampusCanvas: $('reveal-campus-canvas'),
 
     // Leaderboard
-    lbList:        $('lb-list'),
-    lbRoundLabel:  $('lb-round-label'),
+    lbList:            $('lb-list'),
+    lbRoundLabel:      $('lb-round-label'),
 
     // Game over
-    gameoverPodium: $('gameover-podium'),
-    btnPlayAgain:   $('btn-play-again'),
+    gameoverPodium:    $('gameover-podium'),
+    btnPlayAgain:      $('btn-play-again'),
 
     // Toast
-    toastContainer: $('toast-container'),
+    toastContainer:    $('toast-container'),
   };
 
   // ── Screen Manager ─────────────────────────────────────────────────────────
@@ -110,15 +108,15 @@ const PlayerApp = (() => {
   // ── Toast ──────────────────────────────────────────────────────────────────
 
   /**
-   * Show a transient toast notification.
-   *
-   * @param {string} message
+   * @param {string}  message
    * @param {'default'|'error'|'success'} [type='default']
-   * @param {number} [durationMs=3000]
+   * @param {number}  [durationMs=3000]
    */
   function toast(message, type = 'default', durationMs = 3000) {
     const el = document.createElement('div');
-    el.className = `toast${type === 'error' ? ' toast-error' : type === 'success' ? ' toast-success' : ''}`;
+    el.className = `toast${
+      type === 'error'   ? ' toast-error'   :
+      type === 'success' ? ' toast-success' : ''}`;
     el.textContent = message;
     els.toastContainer.appendChild(el);
     setTimeout(() => el.remove(), durationMs);
@@ -127,11 +125,11 @@ const PlayerApp = (() => {
   // ── Timer ──────────────────────────────────────────────────────────────────
 
   /**
-   * Start the visual countdown timer.
-   * Uses local Date.now() drift-corrected against server-provided endsAt.
+   * Start the visual timer.
+   * The local interval only renders — S_ROUND_TICK corrects drift every second.
    *
-   * @param {number} endsAt       Unix ms timestamp from server
-   * @param {number} durationMs   Total round duration (for bar scaling)
+   * @param {number} endsAt      Server Unix ms timestamp
+   * @param {number} durationMs  Total round duration for bar scaling
    */
   function startTimer(endsAt, durationMs) {
     _clearTimer();
@@ -141,15 +139,11 @@ const PlayerApp = (() => {
     function tick() {
       const remaining = Math.max(0, state.roundEndsAt - Date.now());
       const secs      = Math.ceil(remaining / 1000);
-      const progress  = remaining / state.roundDurationMs; // 1 → 0
+      const progress  = remaining / state.roundDurationMs;
 
-      // Digit
-      els.timerDigit.textContent = secs;
+      els.timerDigit.textContent       = secs;
+      els.timerBar.style.transform     = `scaleX(${progress})`;
 
-      // Bar scale
-      els.timerBar.style.transform = `scaleX(${progress})`;
-
-      // Colour states
       const isWarn   = secs <= 10 && secs > 5;
       const isDanger = secs <= 5;
 
@@ -158,13 +152,11 @@ const PlayerApp = (() => {
         el.classList.toggle('danger', isDanger);
       });
 
-      if (remaining <= 0) {
-        _clearTimer();
-      }
+      if (remaining <= 0) _clearTimer();
     }
 
     tick();
-    state.timerInterval = setInterval(tick, 250); // 250ms for smoothness
+    state.timerInterval = setInterval(tick, 250);
   }
 
   function _clearTimer() {
@@ -177,42 +169,32 @@ const PlayerApp = (() => {
   // ── Guess Coordination ────────────────────────────────────────────────────
 
   /**
-   * Called by WorldMapView or CampusMapView when the player clicks a location.
-   * Stages the coord and enables the confirm button.
+   * Called by WorldMapView or CampusMapView when player clicks a location.
    *
    * @param {{ lat: number, lng: number }|{ x: number, y: number }} coord
    */
   function onPinPlaced(coord) {
     if (state.guessSubmitted) return;
     state.pendingCoord = coord;
-    els.btnSubmit.disabled = false;
-    els.guessStatus.textContent = 'Pin placed — confirm when ready';
-    els.guessStatus.style.color = 'var(--accent)';
+    els.btnSubmit.disabled          = false;
+    els.guessStatus.textContent     = 'Pin placed — confirm when ready';
+    els.guessStatus.style.color     = 'var(--accent)';
   }
 
-  /**
-   * Submit the staged guess to the server.
-   */
   function _submitGuess() {
     if (!state.pendingCoord || state.guessSubmitted) return;
     state.guessSubmitted = true;
-
     SocketClient.submitGuess(state.roundIndex, state.pendingCoord);
-
-    // Immediately lock UI
-    els.btnSubmit.disabled = true;
+    els.btnSubmit.disabled          = true;
     els.submittedOverlay.style.display = 'flex';
-    els.guessStatus.textContent = 'Guess locked in!';
-    els.guessStatus.style.color = 'var(--text-secondary)';
+    els.guessStatus.textContent     = 'Guess locked in!';
+    els.guessStatus.style.color     = 'var(--text-secondary)';
   }
 
   // ── Round Setup ───────────────────────────────────────────────────────────
 
   /**
-   * Configure the round screen for the incoming round.
-   * Initialises the correct map/viewer, resets guess state.
-   *
-   * @param {Object} round       Client-safe round object
+   * @param {Object} round
    * @param {number} roundIndex
    * @param {number} totalRounds
    * @param {number} durationMs
@@ -225,20 +207,17 @@ const PlayerApp = (() => {
     state.guessSubmitted = false;
     state.pendingCoord   = null;
 
-    // Round type chip
     const isWorld = round.type === ROUND_TYPE.WORLD;
     els.roundChip.textContent = isWorld ? 'World' : 'Campus';
     els.roundChip.className   = `round-chip ${isWorld ? 'world' : 'campus'}`;
 
-    // Reset submit button
-    els.btnSubmit.disabled = true;
+    els.btnSubmit.disabled             = true;
     els.submittedOverlay.style.display = 'none';
-    els.guessStatus.textContent = 'Drop a pin on the map';
-    els.guessStatus.style.color = 'var(--text-secondary)';
-    els.guessPill.textContent   = '— / —';
+    els.guessStatus.textContent        = 'Drop a pin on the map';
+    els.guessStatus.style.color        = 'var(--text-secondary)';
+    els.guessPill.textContent          = '— / —';
     els.guessPill.classList.remove('all-guessed');
 
-    // Show correct map, hide other
     if (isWorld) {
       els.worldMap.style.display      = 'block';
       els.campusMapWrap.style.display = 'none';
@@ -249,19 +228,10 @@ const PlayerApp = (() => {
       CampusMapView.init('campus-canvas', 'campus-map-img', round.photoUrl, onPinPlaced);
     }
 
-    // 360° panorama viewer
     _initViewer(round);
-
-    // Timer
     startTimer(endsAt, durationMs);
   }
 
-  /**
-   * Initialise the panorama viewer for the current round.
-   * World rounds → Mapillary, campus rounds → Pannellum.
-   *
-   * @param {Object} round
-   */
   function _initViewer(round) {
     const pannellumEl = $('pannellum-viewer');
     const mapillaryEl = $('mapillary-viewer');
@@ -277,15 +247,7 @@ const PlayerApp = (() => {
     }
   }
 
-  /**
-   * Initialise or reinitialise the Pannellum 360° viewer.
-   *
-   * @param {HTMLElement} container
-   * @param {string}      photoUrl
-   */
   function _initPannellum(container, photoUrl) {
-    // Pannellum attaches to a container element by ID
-    // Destroy previous instance if it exists
     if (window._pannellumViewer) {
       try { window._pannellumViewer.destroy(); } catch (_) {}
     }
@@ -300,36 +262,77 @@ const PlayerApp = (() => {
     });
   }
 
+  // ── State Sync (mid-game rejoin) ──────────────────────────────────────────
+
+  /**
+   * Called when S_GAME_STATE_SYNC is received after a rejoin.
+   * Snaps the player to whatever screen matches the current game state
+   * without waiting for the next server broadcast.
+   *
+   * @param {Object} sync  S_GAME_STATE_SYNC payload
+   */
+  function applyStateSync(sync) {
+    const { gameState: gs, currentRoundPayload, players } = sync;
+
+    switch (gs) {
+      case GAME_STATE.LOBBY:
+      case GAME_STATE.ROUND_COUNTDOWN:
+        showScreen('waiting');
+        break;
+
+      case GAME_STATE.ROUND_ACTIVE: {
+        if (!currentRoundPayload) { showScreen('waiting'); break; }
+        const { round, roundIndex, totalRounds, durationMs, endsAt } = currentRoundPayload;
+        // Only set up map/viewer if endsAt is still in the future
+        if (endsAt && endsAt > Date.now()) {
+          setupRound(round, roundIndex, totalRounds, durationMs, endsAt);
+          showScreen('round');
+        } else {
+          // Round already over by the time we connected — wait for reveal
+          showScreen('waiting');
+        }
+        break;
+      }
+
+      case GAME_STATE.ROUND_REVEAL:
+        // Reveal is already in progress — wait for next S_ROUND_REVEAL
+        // or S_LEADERBOARD broadcast
+        showScreen('waiting');
+        break;
+
+      case GAME_STATE.LEADERBOARD:
+        if (players) renderLeaderboard({ players, roundIndex: sync.roundIndex, totalRounds: sync.totalRounds });
+        break;
+
+      case GAME_STATE.GAME_OVER:
+        // Show game over with whatever we have
+        showScreen('gameover');
+        break;
+
+      default:
+        showScreen('waiting');
+    }
+  }
+
   // ── Reveal Screen ─────────────────────────────────────────────────────────
 
   /**
-   * Render the post-round reveal screen.
-   * Shows correct pin + all guess pins, player's own result.
-   *
-   * @param {Object} payload  S_ROUND_REVEAL payload from server
+   * @param {Object} payload  S_ROUND_REVEAL payload
    */
   function renderReveal(payload) {
     _clearTimer();
 
-    const {
-      answer,
-      scores,
-      roundType,
-      roundLabel,
-      locationHint,
-    } = payload;
+    const { answer, scores, roundType, roundLabel, locationHint } = payload;
 
-    // Find this player's own score entry
     const myScore = scores.find((s) => s.playerId === state.playerId);
 
-    // Round label + location
     els.revealRoundLabel.textContent = roundLabel ?? '';
-    els.revealLocation.textContent   = locationHint ?? (roundType === ROUND_TYPE.WORLD ? 'Unknown location' : 'Campus location');
+    els.revealLocation.textContent   = locationHint
+      ?? (roundType === ROUND_TYPE.WORLD ? 'Unknown location' : 'Campus location');
     els.revealDistance.textContent   = myScore
       ? `Your guess: ${myScore.distanceDisplay}`
       : 'You did not submit a guess this round';
 
-    // Points + rank badges
     if (myScore) {
       els.revealPointsBadge.textContent = `+${myScore.points} pts`;
       els.revealRankBadge.textContent   = `Rank #${myScore.rank}`;
@@ -340,7 +343,6 @@ const PlayerApp = (() => {
       els.revealRankBadge.classList.add('hidden');
     }
 
-    // Map reveal
     if (roundType === ROUND_TYPE.WORLD) {
       els.revealWorldMap.style.display   = 'block';
       els.revealCampusWrap.style.display = 'none';
@@ -363,8 +365,6 @@ const PlayerApp = (() => {
   // ── Leaderboard ────────────────────────────────────────────────────────────
 
   /**
-   * Render the between-rounds leaderboard.
-   *
    * @param {Object} payload  S_LEADERBOARD payload
    */
   function renderLeaderboard(payload) {
@@ -376,24 +376,23 @@ const PlayerApp = (() => {
     els.lbList.innerHTML = '';
 
     players.forEach((p, i) => {
-      const isSelf   = p.id === state.playerId;
-      const pos      = i + 1;
-      const posClass = pos <= 3 ? `pos-${pos}` : '';
+      const isSelf = p.id === state.playerId;
+      const pos    = i + 1;
 
       const row = document.createElement('div');
       row.className = [
         'lb-row',
-        isSelf               ? 'lb-row--self'    : '',
-        pos === 1            ? 'lb-row--podium1'  : '',
-        pos === 2            ? 'lb-row--podium2'  : '',
-        pos === 3            ? 'lb-row--podium3'  : '',
+        isSelf  ? 'lb-row--self'   : '',
+        pos === 1 ? 'lb-row--podium1' : '',
+        pos === 2 ? 'lb-row--podium2' : '',
+        pos === 3 ? 'lb-row--podium3' : '',
       ].filter(Boolean).join(' ');
 
       row.innerHTML = `
-        <span class="lb-pos ${posClass}">${_posIcon(pos)}</span>
-        <span class="lb-nick ${p.connected ? '' : 'disconnected'}"
-              title="${p.nickname}">
-          ${_escHtml(p.nickname)}${isSelf ? ' <span class="badge badge-accent" style="font-size:0.6rem">you</span>' : ''}
+        <span class="lb-pos ${pos <= 3 ? `pos-${pos}` : ''}">${_posIcon(pos)}</span>
+        <span class="lb-nick ${p.connected ? '' : 'disconnected'}" title="${_escHtml(p.nickname)}">
+          ${_escHtml(p.nickname)}
+          ${isSelf ? '<span class="badge badge-accent" style="font-size:0.6rem">you</span>' : ''}
         </span>
         <span class="lb-round-pts">${p.roundPoints != null ? `+${p.roundPoints}` : ''}</span>
         <span class="lb-total-pts t-mono">${p.score}</span>
@@ -408,13 +407,11 @@ const PlayerApp = (() => {
   // ── Game Over ──────────────────────────────────────────────────────────────
 
   /**
-   * Render the final game over / podium screen.
-   *
    * @param {Object} payload  S_GAME_OVER payload
    */
   function renderGameOver(payload) {
     _clearTimer();
-    const { leaderboard, podium } = payload;
+    const { leaderboard } = payload;
 
     els.gameoverPodium.innerHTML = '';
 
@@ -427,7 +424,10 @@ const PlayerApp = (() => {
       row.style.cssText = 'display:grid;gap:0.75rem';
       row.innerHTML = `
         <span class="lb-pos ${pos <= 3 ? `pos-${pos}` : ''}">${_posIcon(pos)}</span>
-        <span class="lb-nick">${_escHtml(p.nickname)}${isSelf ? ' <span class="badge badge-accent" style="font-size:0.6rem">you</span>' : ''}</span>
+        <span class="lb-nick">
+          ${_escHtml(p.nickname)}
+          ${isSelf ? '<span class="badge badge-accent" style="font-size:0.6rem">you</span>' : ''}
+        </span>
         <span></span>
         <span class="lb-total-pts t-mono">${p.score}</span>
       `;
@@ -441,7 +441,27 @@ const PlayerApp = (() => {
   // ── Socket Event Wiring ───────────────────────────────────────────────────
 
   function _wireEvents() {
-    // ── Connection lifecycle ───────────────────────────────────────────────
+
+    // ── Connection lifecycle ─────────────────────────────────────────────
+
+    SocketClient.on('_connected', () => {
+      // On every connection (including reconnects), attempt auto-rejoin first
+      const saved = SocketClient.getSavedSession();
+      if (saved.playerId && saved.nickname) {
+        // Restore in-memory state from sessionStorage
+        state.nickname  = saved.nickname;
+        state.roomCode  = saved.roomCode;
+        state.playerId  = saved.playerId;
+        state.role      = saved.role;
+
+        SocketClient.rejoin({
+          playerId: saved.playerId,
+          nickname: saved.nickname,
+          // Players never have adminToken — host uses hostApp.js
+        });
+      }
+      // If no saved session, just sit on lobby screen waiting for user input
+    });
 
     SocketClient.on('_disconnected', () => {
       toast('Connection lost — reconnecting…', 'error', 8000);
@@ -449,18 +469,14 @@ const PlayerApp = (() => {
 
     SocketClient.on('_reconnected', () => {
       toast('Reconnected!', 'success');
-      // Re-join with saved session
-      const saved = SocketClient.getSavedSession();
-      if (saved.roomCode && state.nickname) {
-        SocketClient.joinRoom(saved.roomCode, state.nickname);
-      }
+      // _connected will fire after reconnect and handle the rejoin automatically
     });
 
     SocketClient.on('_reconnect_failed', () => {
-      toast('Could not reconnect to server. Please refresh the page.', 'error', 0);
+      toast('Could not reconnect. Please refresh the page.', 'error', 0);
     });
 
-    // ── S_ROOM_JOINED ──────────────────────────────────────────────────────
+    // ── S_ROOM_JOINED ────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_ROOM_JOINED, (payload) => {
       const { roomCode, playerId, players, reconnected, gameState: gs } = payload;
@@ -469,72 +485,77 @@ const PlayerApp = (() => {
       state.playerId = playerId;
       state.role     = payload.role;
 
-      SocketClient.setSession(roomCode, playerId);
+      // Persist full session so page refresh works seamlessly
+      SocketClient.setSession({
+        roomCode,
+        playerId,
+        nickname: state.nickname,
+        role:     payload.role,
+      });
 
-      // Update waiting screen
       els.waitingNick.textContent  = state.nickname;
-      els.waitingCount.textContent = `${players.length} player${players.length !== 1 ? 's' : ''} joined`;
+      els.waitingCount.textContent =
+        `${players.filter(p => p.role !== 'host').length} player(s) joined`;
 
       if (reconnected && gs && gs !== GAME_STATE.LOBBY) {
-        toast('You\'ve been reconnected mid-game', 'success');
-        // If game is active, they'll get next round-start/reveal event naturally
-        // For now put them on the waiting screen until next broadcast
+        toast('Reconnected to game in progress', 'success');
+        // S_GAME_STATE_SYNC will arrive immediately after and snap to correct screen
+        showScreen('waiting'); // temporary holding screen
+      } else {
+        showScreen('waiting');
       }
-
-      showScreen('waiting');
     });
 
-    // ── S_ROOM_PLAYERS ─────────────────────────────────────────────────────
+    // ── S_GAME_STATE_SYNC ────────────────────────────────────────────────
+    // Received after C_REJOIN — snaps player to current game screen
+
+    SocketClient.on(EVENTS.S_GAME_STATE_SYNC, (payload) => {
+      applyStateSync(payload);
+    });
+
+    // ── S_ROOM_PLAYERS ───────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_ROOM_PLAYERS, (payload) => {
-      const { players } = payload;
-      els.waitingCount.textContent =
-        `${players.length} player${players.length !== 1 ? 's' : ''} joined`;
+      const nonHost = payload.players.filter(p => p.role !== 'host');
+      els.waitingCount.textContent = `${nonHost.length} player(s) joined`;
     });
 
-    // ── S_GAME_COUNTDOWN ───────────────────────────────────────────────────
+    // ── S_GAME_COUNTDOWN ─────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_GAME_COUNTDOWN, (payload) => {
       const { countdownMs, totalRounds } = payload;
       state.totalRounds = totalRounds;
 
       showScreen('countdown');
-      els.countdownLabel.textContent =
-        `${totalRounds} rounds — good luck!`;
+      els.countdownLabel.textContent = `${totalRounds} rounds — good luck!`;
 
-      // Animate 3-2-1
       const steps = Math.ceil(countdownMs / 1000);
       let current = steps;
 
       function tick() {
-        els.countdownNumber.textContent = current;
-        // Re-trigger the CSS pop animation
+        els.countdownNumber.textContent     = current;
         els.countdownNumber.style.animation = 'none';
-        void els.countdownNumber.offsetWidth; // force reflow
+        void els.countdownNumber.offsetWidth;
         els.countdownNumber.style.animation = '';
-
         current--;
-        if (current > 0) {
-          setTimeout(tick, 1000);
-        }
+        if (current > 0) setTimeout(tick, 1000);
       }
       tick();
     });
 
-    // ── S_ROUND_START ──────────────────────────────────────────────────────
+    // ── S_ROUND_START ────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_ROUND_START, (payload) => {
       const { round, roundIndex, totalRounds, durationMs, endsAt } = payload;
-      // Prefetch sequence data immediately so arrows appear faster
-  if (round.type === ROUND_TYPE.WORLD && round.panoId) {
-    WorldMapView.prefetchSequence(round.panoId);
-  }
+
+      if (round.type === ROUND_TYPE.WORLD && round.panoId) {
+        WorldMapView.prefetchSequence(round.panoId);
+      }
+
       setupRound(round, roundIndex, totalRounds, durationMs, endsAt);
       showScreen('round');
 
-      // Multiple resize attempts at increasing delays
-      // because the browser may still be painting the layout
-      // when the first one fires
+      // Staggered resize to fix Mapillary/Leaflet zero-size init
       [100, 300, 600].forEach((delay) => {
         setTimeout(() => {
           window.dispatchEvent(new Event('resize'));
@@ -545,59 +566,57 @@ const PlayerApp = (() => {
       });
     });
 
-    // ── S_ROUND_TICK ───────────────────────────────────────────────────────
-    // Server sends this every second as an authoritative time source.
-    // We use it to correct any drift in our local timer.
+    // ── S_ROUND_TICK — server clock drives the timer display ─────────────
 
-    SocketClient.on(EVENTS.S_ROUND_TICK, (payload) => {
-      const { remainingMs } = payload;
-      // Resync local endsAt to prevent accumulated drift
+    SocketClient.on(EVENTS.S_ROUND_TICK, ({ remainingMs }) => {
+      // Overwrite local endsAt with server's authoritative value
       state.roundEndsAt = Date.now() + remainingMs;
     });
 
-    // ── S_GUESS_COUNT ──────────────────────────────────────────────────────
+    // ── S_GUESS_COUNT ────────────────────────────────────────────────────
 
-    SocketClient.on(EVENTS.S_GUESS_COUNT, (payload) => {
-      const { guessCount, totalPlayers } = payload;
-      const allIn = guessCount >= totalPlayers;
+    SocketClient.on(EVENTS.S_GUESS_COUNT, ({ guessCount, totalPlayers }) => {
       els.guessPill.textContent = `${guessCount} / ${totalPlayers}`;
-      els.guessPill.classList.toggle('all-guessed', allIn);
+      els.guessPill.classList.toggle('all-guessed', guessCount >= totalPlayers);
     });
 
-    // ── S_GUESS_ACK ────────────────────────────────────────────────────────
+    // ── S_GUESS_ACK ──────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_GUESS_ACK, (payload) => {
       if (!payload.accepted) {
-        toast('Guess already recorded — first pin counts!', 'default');
+        toast('Guess already recorded — first pin counts!');
       }
     });
 
-    // ── S_ROUND_REVEAL ─────────────────────────────────────────────────────
+    // ── S_ROUND_REVEAL ───────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_ROUND_REVEAL, (payload) => {
       renderReveal(payload);
     });
 
-    // ── S_LEADERBOARD ──────────────────────────────────────────────────────
+    // ── S_LEADERBOARD ────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_LEADERBOARD, (payload) => {
+      if (payload.resumed) toast('Game resumed from last checkpoint', 'success');
       renderLeaderboard(payload);
     });
 
-    // ── S_GAME_OVER ────────────────────────────────────────────────────────
+    // ── S_GAME_OVER ──────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_GAME_OVER, (payload) => {
       renderGameOver(payload);
     });
 
-    // ── S_ERROR ────────────────────────────────────────────────────────────
+    // ── S_ERROR ──────────────────────────────────────────────────────────
 
     SocketClient.on(EVENTS.S_ERROR, (payload) => {
       const { code, message } = payload;
-      console.error('[game error]', code, message);
+      console.error('[player error]', code, message);
 
-      if (code === 'ROOM_NOT_FOUND') {
-        els.joinError.textContent = 'Room not found. Check the code and try again.';
+      if (code === 'ROOM_NOT_FOUND' || code === 'PLAYER_NOT_FOUND') {
+        // Saved session is stale — clear it and show join form
+        SocketClient.clearSession();
+        els.joinError.textContent = 'Session expired. Please join again.';
         els.joinError.classList.remove('hidden');
         showScreen('lobby');
         return;
@@ -611,7 +630,7 @@ const PlayerApp = (() => {
       }
 
       if (code === 'ROOM_ALREADY_STARTED') {
-        els.joinError.textContent = 'The game has already started — you cannot join now.';
+        els.joinError.textContent = 'Game has already started. If you were playing, use your saved session.';
         els.joinError.classList.remove('hidden');
         showScreen('lobby');
         return;
@@ -629,8 +648,6 @@ const PlayerApp = (() => {
   // ── DOM Event Listeners ───────────────────────────────────────────────────
 
   function _wireDom() {
-
-    // ── Join form ──────────────────────────────────────────────────────────
 
     function _attemptJoin() {
       const code = els.inputCode.value.trim().toUpperCase();
@@ -650,13 +667,12 @@ const PlayerApp = (() => {
         return;
       }
 
-      state.nickname = nick;
-      els.btnJoin.disabled = true;
-      els.btnJoin.textContent = 'Joining…';
+      state.nickname           = nick;
+      els.btnJoin.disabled     = true;
+      els.btnJoin.textContent  = 'Joining…';
 
       SocketClient.joinRoom(code, nick);
 
-      // Re-enable after timeout in case of error
       setTimeout(() => {
         els.btnJoin.disabled    = false;
         els.btnJoin.textContent = 'Join Game';
@@ -665,27 +681,22 @@ const PlayerApp = (() => {
 
     els.btnJoin.addEventListener('click', _attemptJoin);
 
-    // Allow pressing Enter in either input field
     [els.inputCode, els.inputNick].forEach((input) => {
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') _attemptJoin();
       });
     });
 
-    // Auto-uppercase room code as typed
     els.inputCode.addEventListener('input', () => {
       const pos = els.inputCode.selectionStart;
       els.inputCode.value = els.inputCode.value.toUpperCase();
       els.inputCode.setSelectionRange(pos, pos);
     });
 
-    // ── Submit guess button ────────────────────────────────────────────────
-
     els.btnSubmit.addEventListener('click', _submitGuess);
 
-    // ── Play again ─────────────────────────────────────────────────────────
-
     els.btnPlayAgain.addEventListener('click', () => {
+      SocketClient.clearSession();
       state.nickname   = null;
       state.roomCode   = null;
       state.playerId   = null;
@@ -698,33 +709,28 @@ const PlayerApp = (() => {
     });
   }
 
-  // ── Reconnection on page load ─────────────────────────────────────────────
+  // ── Page Load: auto-rejoin or pre-fill lobby ──────────────────────────────
 
   /**
-   * On page load, check sessionStorage for a saved session.
-   * If found, prompt the player to confirm their nickname and attempt reconnect.
-   * This handles the "accidentally refreshed the tab" case.
+   * Check sessionStorage before showing any screen.
+   * If a valid session exists, pre-fill the join form.
+   * The actual rejoin fires in the _connected handler once the socket connects.
    */
   function _checkSavedSession() {
     const saved = SocketClient.getSavedSession();
+
     if (saved.roomCode) {
-      // Pre-fill the join form with saved values so the user
-      // just has to press Join to reconnect
+      // Pre-fill the form in case auto-rejoin fails
+      // (stale session, game over, etc)
       els.inputCode.value = saved.roomCode;
-      // We don't restore nickname from storage — the player types it again
-      // This is intentional: it's the verification mechanism for reconnection
+      if (saved.nickname) {
+        els.inputNick.value = saved.nickname;
+      }
     }
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────────
 
-  /**
-   * Return a display string for a leaderboard position.
-   * Top 3 get medal emoji; rest get their number.
-   *
-   * @param {number} pos  1-based
-   * @returns {string}
-   */
   function _posIcon(pos) {
     if (pos === 1) return '🥇';
     if (pos === 2) return '🥈';
@@ -732,14 +738,6 @@ const PlayerApp = (() => {
     return String(pos);
   }
 
-  /**
-   * Escape HTML special characters to prevent XSS from nicknames.
-   * Nicknames come from other users, so they must be escaped before
-   * injecting into innerHTML.
-   *
-   * @param {string} str
-   * @returns {string}
-   */
   function _escHtml(str) {
     return String(str)
       .replace(/&/g, '&amp;')
@@ -752,25 +750,15 @@ const PlayerApp = (() => {
   // ── Init ───────────────────────────────────────────────────────────────────
 
   function init() {
-    // Connect socket
     SocketClient.connect();
-
-    // Wire all events and DOM listeners
     _wireEvents();
     _wireDom();
-
-    // Check for saved session (page refresh recovery)
     _checkSavedSession();
-
-    // Start on lobby screen
     showScreen('lobby');
   }
-
-  // ── Public API ─────────────────────────────────────────────────────────────
 
   return { init, toast, onPinPlaced };
 
 })();
 
-// Boot
 document.addEventListener('DOMContentLoaded', () => PlayerApp.init());

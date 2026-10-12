@@ -1,41 +1,51 @@
 'use strict';
 
 const { customAlphabet } = require('nanoid');
-const logger = require('./logger');
-const config = require('./config');
+const logger  = require('./logger');
+const config  = require('./config');
 const {
   MAX_PLAYERS,
   ROOM_CODE_LENGTH,
   GAME_STATE,
   ROLE,
 } = require('./constants');
-const { RoomError, ERROR_CODE } = require('./errors');
+const { RoomError, AuthError, ERROR_CODE } = require('./errors');
 
 // ─── Join Code Generator ──────────────────────────────────────────────────────
 
 /**
- * Alphabet deliberately excludes visually ambiguous characters:
- * 0/O, 1/I/L so players reading a code off a projector don't mistype it.
+ * Excludes visually ambiguous characters (0/O, 1/I/L)
+ * so players reading a code off a projector don't mistype it.
  */
-const generateCode = customAlphabet('23456789ABCDEFGHJKMNPQRSTUVWXYZ', ROOM_CODE_LENGTH);
+const generateCode = customAlphabet(
+  '23456789ABCDEFGHJKMNPQRSTUVWXYZ',
+  ROOM_CODE_LENGTH
+);
 
-// ─── In-Memory Room Registry ──────────────────────────────────────────────────
+// ─── Singleton Room ───────────────────────────────────────────────────────────
 
 /**
- * Master map of all active rooms.
- * Key: room code (string)
- * Value: Room object (see createRoom)
+ * There is exactly one room per server instance.
+ * All state lives here; no Map of rooms needed.
  *
- * @type {Map<string, Room>}
+ * @type {Room|null}
  */
-const rooms = new Map();
+let _room = null;
 
 /**
- * Secondary index: socketId → { roomCode, playerId }
- * Used to look up which room/player a socket belongs to on disconnect,
- * without scanning all rooms.
+ * The admin token is a server-side secret generated at room creation.
+ * It is stored here (never sent to clients in plain text) and is used
+ * to verify that a reconnecting host is the original host.
  *
- * @type {Map<string, { roomCode: string, playerId: string }>}
+ * @type {string|null}
+ */
+let _adminToken = null;
+
+/**
+ * Secondary index: socketId → { playerId }
+ * O(1) lookup from socket to player on any event/disconnect.
+ *
+ * @type {Map<string, { playerId: string }>}
  */
 const socketIndex = new Map();
 
@@ -43,202 +53,328 @@ const socketIndex = new Map();
 
 /**
  * @typedef {Object} Player
- * @property {string} id             Stable player ID (survives reconnection)
- * @property {string} nickname        Display name chosen at join
- * @property {string} role            ROLE.HOST or ROLE.PLAYER
- * @property {string|null} socketId   Current socket ID (null if disconnected)
- * @property {boolean} connected      Whether socket is currently live
- * @property {number} score           Cumulative score across all rounds
- * @property {number} joinedAt        Unix timestamp (ms)
- * @property {number|null} lastSeenAt Unix timestamp of last disconnect (null if never)
+ * @property {string}      id
+ * @property {string}      nickname
+ * @property {string}      role         ROLE.HOST | ROLE.PLAYER
+ * @property {string|null} socketId     Current socket ID (null if disconnected)
+ * @property {boolean}     connected
+ * @property {number}      score
+ * @property {number}      joinedAt
+ * @property {number|null} lastSeenAt
  */
 
 /**
  * @typedef {Object} Room
- * @property {string} code             Join code
- * @property {string} hostPlayerId     Player ID of the host
- * @property {Map<string, Player>} players  Key: player ID
- * @property {string} state            Current GAME_STATE value
- * @property {number} currentRoundIndex
- * @property {Object|null} roundTimer  Active timer handle (from gameState)
- * @property {number} createdAt        Unix timestamp (ms)
- * @property {number|null} endedAt     Unix timestamp when game ended
- * @property {NodeJS.Timeout|null} cleanupTimer  TTL cleanup handle
+ * @property {string}                  code
+ * @property {string}                  hostPlayerId
+ * @property {Map<string, Player>}     players       Key: player ID
+ * @property {string}                  state         GAME_STATE value
+ * @property {number}                  createdAt
+ * @property {number|null}             endedAt
+ * @property {NodeJS.Timeout|null}     cleanupTimer
  */
+
+// ─── Admin Token ──────────────────────────────────────────────────────────────
+
+/**
+ * Generate a new admin token.
+ * This is what gets stored in sessionStorage on the host device
+ * and is sent back on reconnect to prove identity.
+ *
+ * @returns {string}
+ */
+function generateAdminToken() {
+  // 32 random alphanumeric chars — enough entropy for a college event
+  return customAlphabet('ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789', 32)();
+}
+
+/**
+ * Validate an admin token against the stored one.
+ *
+ * @param {string} token
+ * @returns {boolean}
+ */
+function validateAdminToken(token) {
+  if (!_adminToken || !token) return false;
+  return _adminToken === token;
+}
+
+/**
+ * Get the current admin token (for checkpoint persistence).
+ *
+ * @returns {string|null}
+ */
+function getAdminToken() {
+  return _adminToken;
+}
 
 // ─── Room Lifecycle ───────────────────────────────────────────────────────────
 
 /**
- * Create a new room and register it.
- * Called when a host client emits C_HOST_CREATE.
+ * Create the singleton room.
+ * Throws ROOM_ALREADY_EXISTS if a room is already active.
+ * Called when the host submits the correct admin password.
  *
- * @param {string} hostSocketId  Socket ID of the creating host
- * @param {string} hostNickname  Display name for the host
- * @returns {{ room: Room, host: Player }}
+ * @param {string} hostSocketId
+ * @param {string} hostNickname
+ * @returns {{ room: Room, host: Player, adminToken: string }}
  */
 function createRoom(hostSocketId, hostNickname) {
-  // Generate a unique code (retry on the rare collision)
-  let code;
-  let attempts = 0;
-  do {
-    code = generateCode();
-    attempts++;
-    if (attempts > 10) {
-      // Should never happen in practice but guards against infinite loop
-      throw new RoomError('Failed to generate unique room code', ERROR_CODE.INTERNAL);
-    }
-  } while (rooms.has(code));
+  if (_room !== null) {
+    throw new RoomError(
+      'A room is already active. Only one room can exist at a time.',
+      ERROR_CODE.ROOM_ALREADY_EXISTS
+    );
+  }
+
+  const code  = generateCode();
+  const token = generateAdminToken();
 
   /** @type {Player} */
   const host = {
-    id: _generatePlayerId(),
-    nickname: hostNickname.trim(),
-    role: ROLE.HOST,
-    socketId: hostSocketId,
-    connected: true,
-    score: 0,
-    joinedAt: Date.now(),
-    lastSeenAt: null,
+    id:          _generatePlayerId(),
+    nickname:    hostNickname.trim(),
+    role:        ROLE.HOST,
+    socketId:    hostSocketId,
+    connected:   true,
+    score:       0,
+    joinedAt:    Date.now(),
+    lastSeenAt:  null,
   };
 
   /** @type {Room} */
-  const room = {
+  _room = {
     code,
-    hostPlayerId: host.id,
-    players: new Map([[host.id, host]]),
-    state: GAME_STATE.LOBBY,
-    currentRoundIndex: -1,
-    roundTimer: null,
-    createdAt: Date.now(),
-    endedAt: null,
-    cleanupTimer: null,
+    hostPlayerId:  host.id,
+    players:       new Map([[host.id, host]]),
+    state:         GAME_STATE.LOBBY,
+    createdAt:     Date.now(),
+    endedAt:       null,
+    cleanupTimer:  null,
   };
 
-  rooms.set(code, room);
-  socketIndex.set(hostSocketId, { roomCode: code, playerId: host.id });
+  _adminToken = token;
+  socketIndex.set(hostSocketId, { playerId: host.id });
 
-  logger.info({ roomCode: code, hostId: host.id, hostNickname: host.nickname }, 'Room created');
+  logger.info(
+    { roomCode: code, hostId: host.id, hostNickname: host.nickname },
+    'Singleton room created'
+  );
 
-  return { room, host };
+  return { room: _room, host, adminToken: token };
 }
 
 /**
- * Add a player to an existing room.
- * Called when a player client emits C_JOIN.
+ * Restore the singleton room from a checkpoint snapshot.
+ * Called on server startup when a valid checkpoint is found.
  *
- * @param {string} roomCode
+ * @param {import('./persistence').Checkpoint} checkpoint
+ * @returns {Room}
+ */
+function restoreFromCheckpoint(checkpoint) {
+  const players = new Map();
+
+  for (const p of checkpoint.players) {
+    players.set(p.id, {
+      id:          p.id,
+      nickname:    p.nickname,
+      role:        p.role,
+      socketId:    null,      // all sockets are dead after restart
+      connected:   false,
+      score:       p.score,
+      joinedAt:    Date.now(),
+      lastSeenAt:  Date.now(),
+    });
+  }
+
+  _room = {
+    code:          checkpoint.roomCode,
+    hostPlayerId:  checkpoint.hostPlayerId,
+    players,
+    state:         checkpoint.state,
+    createdAt:     Date.now(),
+    endedAt:       null,
+    cleanupTimer:  null,
+  };
+
+  _adminToken = checkpoint.adminToken;
+
+  logger.info(
+    {
+      roomCode:    checkpoint.roomCode,
+      state:       checkpoint.state,
+      roundIndex:  checkpoint.roundIndex,
+      playerCount: players.size,
+    },
+    'Room restored from checkpoint'
+  );
+
+  return _room;
+}
+
+// ─── Host Reconnect ───────────────────────────────────────────────────────────
+
+/**
+ * Reconnect the host using their adminToken stored in sessionStorage.
+ * Token match = they are the original host. No password re-entry needed.
+ *
+ * @param {string} newSocketId
+ * @param {string} adminToken
+ * @returns {{ room: Room, host: Player }}
+ */
+function reconnectHost(newSocketId, adminToken) {
+  if (!_room) {
+    throw new RoomError('No active room to reconnect to', ERROR_CODE.ROOM_NOT_FOUND);
+  }
+
+  if (!validateAdminToken(adminToken)) {
+    throw new AuthError('Invalid admin token — cannot reconnect as host');
+  }
+
+  const host = _room.players.get(_room.hostPlayerId);
+  if (!host) {
+    throw new RoomError('Host player record not found', ERROR_CODE.ROOM_NOT_FOUND);
+  }
+
+  // Remove stale socket index entry
+  if (host.socketId) {
+    socketIndex.delete(host.socketId);
+  }
+
+  host.socketId    = newSocketId;
+  host.connected   = true;
+  host.lastSeenAt  = null;
+
+  socketIndex.set(newSocketId, { playerId: host.id });
+
+  logger.info({ roomCode: _room.code, hostId: host.id }, 'Host reconnected via adminToken');
+
+  return { room: _room, host };
+}
+
+// ─── Player Join / Reconnect ──────────────────────────────────────────────────
+
+/**
+ * Add a new player to the singleton room.
+ *
  * @param {string} socketId
  * @param {string} nickname
  * @returns {{ room: Room, player: Player }}
  */
-function joinRoom(roomCode, socketId, nickname) {
-  const room = _getRoom(roomCode); 
+function joinRoom(socketId, nickname) {
+  if (!_room) {
+    throw new RoomError('No active room — host has not created one yet', ERROR_CODE.ROOM_NOT_FOUND);
+  }
+
   const trimmedNick = nickname.trim();
 
-  // ── Guards ────────────────────────────────────────────────────────────────
-
-  if (room.state !== GAME_STATE.LOBBY) {
+  if (_room.state !== GAME_STATE.LOBBY) {
     throw new RoomError(
       'Game has already started — you cannot join mid-game',
       ERROR_CODE.ROOM_ALREADY_STARTED
     );
   }
 
-  if (room.players.size >= MAX_PLAYERS) {
-    throw new RoomError(
-      `Room is full (max ${MAX_PLAYERS} players)`,
-      ERROR_CODE.ROOM_FULL
-    );
+  if (_room.players.size >= MAX_PLAYERS) {
+    throw new RoomError(`Room is full (max ${MAX_PLAYERS} players)`, ERROR_CODE.ROOM_FULL);
   }
 
-  // Nickname uniqueness check (case-insensitive)
-  const nickTaken = [...room.players.values()].some(
+  // Case-insensitive nickname uniqueness
+  const nickTaken = [..._room.players.values()].some(
     (p) => p.nickname.toLowerCase() === trimmedNick.toLowerCase()
   );
   if (nickTaken) {
     throw new RoomError(
-      `Nickname "${trimmedNick}" is already taken in this room`,
+      `Nickname "${trimmedNick}" is already taken`,
       ERROR_CODE.NICKNAME_TAKEN
     );
   }
 
-  // ── Create Player ─────────────────────────────────────────────────────────
-
   /** @type {Player} */
   const player = {
-    id: _generatePlayerId(),
-    nickname: trimmedNick,
-    role: ROLE.PLAYER,
+    id:          _generatePlayerId(),
+    nickname:    trimmedNick,
+    role:        ROLE.PLAYER,
     socketId,
-    connected: true,
-    score: 0,
-    joinedAt: Date.now(),
-    lastSeenAt: null,
+    connected:   true,
+    score:       0,
+    joinedAt:    Date.now(),
+    lastSeenAt:  null,
   };
 
-  room.players.set(player.id, player);
-  socketIndex.set(socketId, { roomCode, playerId: player.id });
+  _room.players.set(player.id, player);
+  socketIndex.set(socketId, { playerId: player.id });
 
   logger.info(
-    { roomCode, playerId: player.id, nickname: player.nickname, totalPlayers: room.players.size },
-    'Player joined room'
+    {
+      roomCode:     _room.code,
+      playerId:     player.id,
+      nickname:     player.nickname,
+      totalPlayers: _room.players.size,
+    },
+    'Player joined'
   );
 
-  return { room, player };
+  return { room: _room, player };
 }
 
-// ─── Reconnection ─────────────────────────────────────────────────────────────
-
 /**
- * Reconnect a previously-disconnected player to their existing seat.
- * Matched by nickname + room code (since the client has no persistent ID storage).
- * Called during socket reconnection before falling back to a fresh join.
+ * Reconnect a previously-disconnected player by their stable playerId.
+ * playerId comes from the client's sessionStorage — set there at first join.
  *
- * @param {string} roomCode
+ * This is the key fix over the old nickname-based reconnect:
+ *   - Works mid-game (no ROOM_ALREADY_STARTED check)
+ *   - Does not require re-typing nickname
+ *   - Immune to nickname collisions
+ *
  * @param {string} newSocketId
- * @param {string} nickname
- * @returns {{ room: Room, player: Player } | null}  null if no match found
+ * @param {string} playerId
+ * @param {string} nickname  Used only for verification (must match stored nickname)
+ * @returns {{ room: Room, player: Player } | null}  null if no valid match
  */
-function reconnectPlayer(roomCode, newSocketId, nickname) {
-  const room = rooms.get(roomCode);
-  if (!room) return null;
+function reconnectPlayer(newSocketId, playerId, nickname) {
+  if (!_room) return null;
 
-  const trimmedNick = nickname.trim();
-
-  // Find a disconnected player with the same nickname
-  const existing = [...room.players.values()].find(
-    (p) =>
-      p.nickname.toLowerCase() === trimmedNick.toLowerCase() &&
-      !p.connected
-  );
-
+  const existing = _room.players.get(playerId);
   if (!existing) return null;
 
-  // Remove stale socket index entry if it exists
+  // Extra safety: verify nickname matches what we have on record
+  // Prevents someone guessing a playerId and hijacking another player's seat
+  if (existing.nickname.toLowerCase() !== nickname.trim().toLowerCase()) {
+    logger.warn(
+      { playerId, expected: existing.nickname, got: nickname },
+      'Reconnect rejected — nickname mismatch'
+    );
+    return null;
+  }
+
+  // Do not reconnect the host via this path — host uses reconnectHost()
+  if (existing.role === ROLE.HOST) return null;
+
+  // Remove stale socket index
   if (existing.socketId) {
     socketIndex.delete(existing.socketId);
   }
 
-  // Update player with new socket
-  existing.socketId = newSocketId;
-  existing.connected = true;
+  existing.socketId   = newSocketId;
+  existing.connected  = true;
   existing.lastSeenAt = null;
 
-  socketIndex.set(newSocketId, { roomCode, playerId: existing.id });
+  socketIndex.set(newSocketId, { playerId: existing.id });
 
   logger.info(
-    { roomCode, playerId: existing.id, nickname: existing.nickname },
-    'Player reconnected'
+    { roomCode: _room.code, playerId: existing.id, nickname: existing.nickname },
+    'Player reconnected via playerId'
   );
 
-  return { room, player: existing };
+  return { room: _room, player: existing };
 }
 
 // ─── Disconnect ───────────────────────────────────────────────────────────────
 
 /**
- * Mark a player as disconnected when their socket drops.
- * Does NOT remove them from the room — they can reconnect within the TTL.
+ * Mark a player as disconnected.
+ * Seat is held — they can rejoin via reconnectPlayer() or reconnectHost().
  *
  * @param {string} socketId
  * @returns {{ room: Room, player: Player } | null}
@@ -246,156 +382,159 @@ function reconnectPlayer(roomCode, newSocketId, nickname) {
 function handleDisconnect(socketId) {
   const entry = socketIndex.get(socketId);
   if (!entry) return null;
+  if (!_room)  return null;
 
-  const { roomCode, playerId } = entry;
-  const room = rooms.get(roomCode);
-  if (!room) return null;
-
-  const player = room.players.get(playerId);
+  const player = _room.players.get(entry.playerId);
   if (!player) return null;
 
-  player.connected = false;
-  player.lastSeenAt = Date.now();
-  // Keep socketId so we can remove the old entry on reconnect
+  player.connected   = false;
+  player.lastSeenAt  = Date.now();
   socketIndex.delete(socketId);
 
   logger.info(
-    { roomCode, playerId, nickname: player.nickname },
+    { roomCode: _room.code, playerId: player.id, nickname: player.nickname },
     'Player disconnected (seat held)'
   );
 
-  // If every player (including host) has disconnected, schedule room cleanup
-  const anyoneConnected = [...room.players.values()].some((p) => p.connected);
+  // Schedule cleanup only if EVERY player including host is gone
+  const anyoneConnected = [..._room.players.values()].some((p) => p.connected);
   if (!anyoneConnected) {
-    _scheduleCleanup(room, 5 * 60 * 1000); // 5 min if completely empty
-    logger.info({ roomCode }, 'All players disconnected — room cleanup scheduled (5 min)');
+    _scheduleCleanup(5 * 60 * 1000); // 5 min grace period
+    logger.info({ roomCode: _room.code }, 'All players gone — cleanup scheduled (5 min)');
   }
 
-  return { room, player };
+  return { room: _room, player };
 }
 
 // ─── Room Cleanup ─────────────────────────────────────────────────────────────
 
 /**
- * Fully tear down a room and release all associated memory.
- * Called after game ends (via TTL) or when explicitly closed.
+ * Destroy the singleton room and release all memory.
  *
- * @param {string} roomCode
+ * @param {boolean} [deleteCheckpointFile=false]
  */
-function destroyRoom(roomCode) {
-  const room = rooms.get(roomCode);
-  if (!room) return;
+function destroyRoom(deleteCheckpointFile = false) {
+  if (!_room) return;
 
-  // Clear any pending cleanup timer
-  if (room.cleanupTimer) {
-    clearTimeout(room.cleanupTimer);
-    room.cleanupTimer = null;
+  if (_room.cleanupTimer) {
+    clearTimeout(_room.cleanupTimer);
   }
 
-  // Remove all socket index entries for this room's players
-  for (const player of room.players.values()) {
-    if (player.socketId) {
-      socketIndex.delete(player.socketId);
-    }
+  socketIndex.clear();
+
+  const code = _room.code;
+  _room       = null;
+  _adminToken = null;
+
+  if (deleteCheckpointFile) {
+    try {
+      const { deleteCheckpoint } = require('./persistence');
+      deleteCheckpoint();
+    } catch (_) {}
   }
 
-  rooms.delete(roomCode);
-
-  logger.info({ roomCode, playerCount: room.players.size }, 'Room destroyed');
+  logger.info({ roomCode: code }, 'Singleton room destroyed');
 }
 
 /**
- * Schedule automatic room destruction after a delay.
- * Resets any existing timer (safe to call multiple times).
+ * Schedule automatic room destruction.
  *
- * @param {Room} room
- * @param {number} [delayMs]  Defaults to config.ROOM_TTL_MS
+ * @param {number} [delayMs]
  */
-function _scheduleCleanup(room, delayMs = config.ROOM_TTL_MS) {
-  if (room.cleanupTimer) {
-    clearTimeout(room.cleanupTimer);
+function _scheduleCleanup(delayMs = config.ROOM_TTL_MS) {
+  if (!_room) return;
+
+  if (_room.cleanupTimer) {
+    clearTimeout(_room.cleanupTimer);
   }
-  room.cleanupTimer = setTimeout(() => {
-    logger.info({ roomCode: room.code }, 'Room TTL expired — destroying');
-    destroyRoom(room.code);
+
+  _room.cleanupTimer = setTimeout(() => {
+    logger.info({ roomCode: _room?.code }, 'Room TTL expired — destroying');
+    destroyRoom(true);
   }, delayMs);
 
-  // Allow process to exit naturally even if this timer is pending
-  room.cleanupTimer.unref();
+  _room.cleanupTimer.unref();
 }
 
 /**
- * Schedule cleanup after a game ends.
- * Gives enough time for the final leaderboard to be displayed.
- * Called by gameState when transitioning to GAME_OVER.
- *
- * @param {string} roomCode
+ * Schedule post-game cleanup.
+ * Called by gameState when game ends.
  */
-function schedulePostGameCleanup(roomCode) {
-  const room = rooms.get(roomCode);
-  if (!room) return;
-  room.endedAt = Date.now();
-  _scheduleCleanup(room, config.ROOM_TTL_MS);
-  logger.info(
-    { roomCode, cleanupInMs: config.ROOM_TTL_MS },
-    'Post-game room cleanup scheduled'
-  );
+function schedulePostGameCleanup() {
+  if (!_room) return;
+  _room.endedAt = Date.now();
+  _scheduleCleanup(config.ROOM_TTL_MS);
+  logger.info({ roomCode: _room.code }, 'Post-game cleanup scheduled');
 }
 
-// ─── Getters / Queries ────────────────────────────────────────────────────────
+// ─── Getters ──────────────────────────────────────────────────────────────────
 
 /**
- * Get a room by code. Throws if not found.
+ * Get the singleton room. Throws if no room exists.
  *
- * @param {string} roomCode
  * @returns {Room}
  */
-function getRoom(roomCode) {
-  return _getRoom(roomCode);
+function getRoom() {
+  if (!_room) {
+    throw new RoomError('No active room', ERROR_CODE.ROOM_NOT_FOUND);
+  }
+  return _room;
 }
 
 /**
- * Look up which room + player a socket belongs to.
+ * Get the singleton room without throwing.
+ *
+ * @returns {Room|null}
+ */
+function getRoomOrNull() {
+  return _room;
+}
+
+/**
+ * Get the room code of the active singleton room.
+ *
+ * @returns {string|null}
+ */
+function getRoomCode() {
+  return _room?.code ?? null;
+}
+
+/**
+ * Look up which player a socket belongs to.
  *
  * @param {string} socketId
- * @returns {{ roomCode: string, playerId: string } | null}
+ * @returns {{ playerId: string } | null}
  */
 function getRoomBySocket(socketId) {
   return socketIndex.get(socketId) ?? null;
 }
 
 /**
- * Get a player from a room by player ID. Throws if not found.
+ * Get a player by ID. Throws if not found.
  *
- * @param {string} roomCode
  * @param {string} playerId
  * @returns {Player}
  */
-function getPlayer(roomCode, playerId) {
-  const room = _getRoom(roomCode);
-  const player = room.players.get(playerId);
+function getPlayer(playerId) {
+  if (!_room) throw new RoomError('No active room', ERROR_CODE.ROOM_NOT_FOUND);
+  const player = _room.players.get(playerId);
   if (!player) {
-    throw new RoomError(`Player ${playerId} not found in room ${roomCode}`, ERROR_CODE.ROOM_NOT_FOUND);
+    throw new RoomError(`Player ${playerId} not found`, ERROR_CODE.PLAYER_NOT_FOUND);
   }
   return player;
 }
 
 /**
- * Return a serializable snapshot of all players in a room,
- * sorted by score descending. Safe to broadcast to clients.
+ * Return a serializable snapshot of all players sorted by score.
+ * Strips internal fields (socketId, etc.) safe to broadcast to clients.
  *
- * @param {string} roomCode
- * @returns {Array<{ id: string, nickname: string, score: number, connected: boolean, role: string }>}
+ * @returns {Array<{ id, nickname, score, connected, role }>}
  */
-function getPlayerSnapshot(roomCode) {
-  const room = _getRoom(roomCode);
-  return [...room.players.values()]
+function getPlayerSnapshot() {
+  if (!_room) return [];
+  return [..._room.players.values()]
     .map(({ id, nickname, score, connected, role }) => ({
-      id,
-      nickname,
-      score,
-      connected,
-      role,
+      id, nickname, score, connected, role,
     }))
     .sort((a, b) => b.score - a.score);
 }
@@ -403,60 +542,39 @@ function getPlayerSnapshot(roomCode) {
 /**
  * Add points to a player's cumulative score.
  *
- * @param {string} roomCode
  * @param {string} playerId
  * @param {number} points
  */
-function addScore(roomCode, playerId, points) {
-  const player = getPlayer(roomCode, playerId);
+function addScore(playerId, points) {
+  const player = getPlayer(playerId);
   player.score += points;
 }
 
 /**
- * Check whether a socket ID belongs to the host of a given room.
+ * Check whether a socket belongs to the host of the current room.
  *
- * @param {string} roomCode
  * @param {string} socketId
  * @returns {boolean}
  */
-function isHost(roomCode, socketId) {
+function isHost(socketId) {
   const entry = socketIndex.get(socketId);
-  if (!entry || entry.roomCode !== roomCode) return false;
-  const room = rooms.get(roomCode);
-  if (!room) return false;
-  return room.players.get(entry.playerId)?.role === ROLE.HOST;
+  if (!entry || !_room) return false;
+  return _room.players.get(entry.playerId)?.role === ROLE.HOST;
 }
 
 /**
- * Total number of active rooms (for monitoring/health endpoint).
+ * Whether a room currently exists.
  *
- * @returns {number}
+ * @returns {boolean}
  */
-function getRoomCount() {
-  return rooms.size;
+function roomExists() {
+  return _room !== null;
 }
 
 // ─── Private Helpers ──────────────────────────────────────────────────────────
 
 /**
- * Internal getter with error throwing.
- * @param {string} roomCode
- * @returns {Room}
- */
-function _getRoom(roomCode) {
-  const room = rooms.get(roomCode.toUpperCase());
-  if (!room) {
-    throw new RoomError(
-      `Room "${roomCode}" not found`,
-      ERROR_CODE.ROOM_NOT_FOUND
-    );
-  }
-  return room;
-}
-
-/**
- * Generate a short stable player ID.
- * Not cryptographically sensitive — just needs to be unique within a session.
+ * Generate a short stable player ID unique within a session.
  *
  * @returns {string}
  */
@@ -467,17 +585,31 @@ function _generatePlayerId() {
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
+  // Room lifecycle
   createRoom,
+  restoreFromCheckpoint,
+  destroyRoom,
+  schedulePostGameCleanup,
+
+  // Host
+  reconnectHost,
+  generateAdminToken,
+  validateAdminToken,
+  getAdminToken,
+
+  // Players
   joinRoom,
   reconnectPlayer,
   handleDisconnect,
-  destroyRoom,
-  schedulePostGameCleanup,
+
+  // Getters
   getRoom,
+  getRoomOrNull,
+  getRoomCode,
   getRoomBySocket,
   getPlayer,
   getPlayerSnapshot,
   addScore,
   isHost,
-  getRoomCount,
+  roomExists,
 };

@@ -1,23 +1,26 @@
 'use strict';
 
+require('dotenv').config()
 const http = require('http');
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const fs   = require('fs');
 
-const express = require('express');
-const helmet = require('helmet');
+const express  = require('express');
+const helmet   = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Server } = require('socket.io');
 
-const config = require('./config');
-const logger = require('./logger');
+const config   = require('./config');
+const logger   = require('./logger');
 const { registerSocketHandlers } = require('./socketHandlers');
+const rooms      = require('./rooms');
+const gameState  = require('./gameState');
+const { readCheckpoint } = require('./persistence');
 
 // ─── Express App ──────────────────────────────────────────────────────────────
 
 const app = express();
 
-// Security headers — relax CSP slightly to allow Mapillary + Pannellum assets
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -52,8 +55,8 @@ app.use(
           '*.googleapis.com',
           '*.gstatic.com',
           '*.openstreetmap.org',
-          '*.basemaps.cartocdn.com',
-          '*.tile.openstreetmap.org',
+          '*.cartocdn.com',        // <-- FIXED: Wildcard at root level for CARTO
+          '*.stadiamaps.com',      // <-- ADDED: Allows Stadia/Stamen maps if used
           '*.fbcdn.net',
           '*.fna.fbcdn.net',
         ],
@@ -65,7 +68,8 @@ app.use(
           '*.mapbox.com',
           'mapbox.com',
           '*.openstreetmap.org',
-          '*.basemaps.cartocdn.com',
+          '*.cartocdn.com',        // <-- FIXED: Matches img-src adjustments
+          '*.stadiamaps.com',      // <-- ADDED: Matches img-src adjustments
           'events.mapillary.com',
           '*.fbcdn.net',
           '*.fna.fbcdn.net',
@@ -84,59 +88,86 @@ app.use(express.json({ limit: '16kb' }));
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
 
-/**
- * Applied only to HTTP endpoints (health, any future REST routes).
- * Socket.io connections are managed separately via connection limits.
- */
 const httpLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 60,
+  windowMs:        60 * 1000,
+  max:             60,
   standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many requests, please slow down.' },
+  legacyHeaders:   false,
+  message:         { error: 'Too many requests, please slow down.' },
 });
 
 app.use(httpLimiter);
 
-// ─── Static Files ─────────────────────────────────────────────────────────────
+// ─── Config Injection Helper ──────────────────────────────────────────────────
 
+/**
+ * Serve an HTML file with server-side config tokens replaced.
+ * Used for /host and /play so the Mapillary token never sits
+ * hardcoded in committed HTML.
+ *
+ * @param {string}           filePath
+ * @param {express.Response} res
+ */
+function serveWithConfig(filePath, res) {
+  try {
+    let html = fs.readFileSync(filePath, 'utf8');
+    html = html.replace(
+      /__MAPILLARY_CLIENT_TOKEN__/g,
+      config.MAPILLARY_CLIENT_TOKEN
+    );
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(html);
+  } catch (err) {
+    logger.error({ err, filePath }, 'Failed to serve HTML file');
+    res.status(500).send('Internal server error');
+  }
+}
+
+// ─── HTTP Routes ──────────────────────────────────────────────────────────────
+
+// Serve /play and /host BEFORE express.static so static middleware
+// never intercepts them and skips token substitution.
+app.get('/play', (req, res) => {
+  serveWithConfig(path.join(__dirname, '..', 'public', 'player.html'), res);
+});
+
+app.get('/host', (req, res) => {
+  serveWithConfig(path.join(__dirname, '..', 'public', 'host.html'), res);
+});
+
+// Static files (css, js, photos, etc.)
 app.use(
   express.static(path.join(__dirname, '..', 'public'), {
     maxAge: config.NODE_ENV === 'production' ? '1h' : 0,
-    etag: true,
+    etag:   true,
   })
 );
 
 app.use(
   '/admin',
-  express.static(path.join(__dirname, '..', 'admin'), {
-    maxAge: 0, // always fresh — you'll be editing rounds close to the event
-  })
+  express.static(path.join(__dirname, '..', 'admin'), { maxAge: 0 })
 );
 
-// ─── HTTP Routes ──────────────────────────────────────────────────────────────
-
+// Health check — useful for Render warm-up pings and uptime monitors
 app.get('/health', (req, res) => {
+  const room = rooms.getRoomOrNull();
   res.json({
-    status: 'ok',
-    env: config.NODE_ENV,
-    uptime: Math.floor(process.uptime()),
-    time: new Date().toISOString(),
+    status:     'ok',
+    env:        config.NODE_ENV,
+    uptime:     Math.floor(process.uptime()),
+    time:       new Date().toISOString(),
+    room: room
+      ? {
+          code:        room.code,
+          state:       room.state,
+          playerCount: room.players.size,
+        }
+      : null,
   });
 });
 
-// Explicit routes for the two main pages (so direct URL navigation works)
-app.get('/play', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'player.html'));
-});
-
-app.get('/host', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'host.html'));
-});
-
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-// 404 fallback for unmatched HTTP routes
+// 404 fallback
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -144,42 +175,86 @@ app.use((req, res) => {
 // Global Express error handler
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   logger.error({ err, path: req.path }, 'Unhandled HTTP error');
-  const status = err.statusCode ?? 500;
-  res.status(status).json({
+  res.status(err.statusCode ?? 500).json({
     error: err.message ?? 'Internal server error',
-    code: err.code ?? 'INTERNAL_SERVER_ERROR',
+    code:  err.code    ?? 'INTERNAL_SERVER_ERROR',
   });
 });
 
-// ─── HTTP Server ──────────────────────────────────────────────────────────────
+// ─── HTTP + Socket.io Server ──────────────────────────────────────────────────
 
 const server = http.createServer(app);
 
-// ─── Socket.io ────────────────────────────────────────────────────────────────
-
 const io = new Server(server, {
   cors: {
-    origin: config.CORS_ORIGIN,
+    origin:  config.CORS_ORIGIN,
     methods: ['GET', 'POST'],
   },
-  // Tune transport for a controlled LAN/event environment
-  transports: ['websocket', 'polling'], // websocket first, polling as fallback
-  // pingTimeout: 20_000,
-  // pingInterval: 10_000,
-  pingTimeout:  60_000,   // was 20_000 — give 60s before declaring disconnect
-  pingInterval: 15_000,   // was 10_000 — ping less frequently
-  maxHttpBufferSize: 32 * 1024, // 32 KB max per event payload
+  transports:       ['websocket', 'polling'],
+  pingTimeout:      60_000,
+  pingInterval:     15_000,
+  maxHttpBufferSize: 32 * 1024,
   connectionStateRecovery: {
-    // Allow clients to recover missed events after a brief disconnect
-    // maxDisconnectionDuration: 30_000, // 30 seconds
-    maxDisconnectionDuration: 60_000, // was 30_000
-    skipMiddlewares: false,
+    maxDisconnectionDuration: 60_000,
+    skipMiddlewares:          false,
   },
 });
 
 registerSocketHandlers(io);
 
-// ─── Process-level Error Guards ───────────────────────────────────────────────
+// ─── Checkpoint Restore ───────────────────────────────────────────────────────
+
+/**
+ * On startup, attempt to restore a previous game session from the checkpoint
+ * file. This handles the case where the server crashed or was redeployed
+ * mid-game. Players and the host will reconnect via C_REJOIN and receive
+ * S_GAME_STATE_SYNC to snap to the correct screen.
+ *
+ * Only restores if:
+ *   1. A valid, non-expired checkpoint exists
+ *   2. The game was not already in GAME_OVER state
+ */
+function _tryRestoreCheckpoint() {
+  const checkpoint = readCheckpoint();
+  if (!checkpoint) return;
+
+  if (checkpoint.state === 'GAME_OVER') {
+    logger.info('Checkpoint is GAME_OVER — not restoring');
+    return;
+  }
+
+  try {
+    // Restore the singleton room with all players from the checkpoint
+    rooms.restoreFromCheckpoint(checkpoint);
+
+    // Restore the game session at the last completed round index
+    // If state was ROUND_ACTIVE, we treat it as if that round never happened
+    // (players' guesses are lost but scores from previous rounds are intact)
+    const resumeIndex = checkpoint.state === 'ROUND_ACTIVE'
+      ? checkpoint.roundIndex - 1   // replay the interrupted round
+      : checkpoint.roundIndex;
+
+    if (resumeIndex >= 0) {
+      // Game had at least one completed round — resume from leaderboard
+      gameState.resumeFromCheckpoint(resumeIndex, io, checkpoint.roundIds);
+    }
+    // If resumeIndex < 0 the game had not started yet — room is in LOBBY state
+
+    logger.info(
+      {
+        roomCode:    checkpoint.roomCode,
+        state:       checkpoint.state,
+        resumeIndex,
+      },
+      'Game restored from checkpoint — waiting for clients to reconnect'
+    );
+  } catch (err) {
+    logger.error({ err }, 'Failed to restore from checkpoint — starting fresh');
+    rooms.destroyRoom(false);
+  }
+}
+
+// ─── Process Guards ───────────────────────────────────────────────────────────
 
 process.on('uncaughtException', (err) => {
   logger.fatal({ err }, 'Uncaught exception — shutting down');
@@ -194,47 +269,39 @@ process.on('unhandledRejection', (reason) => {
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 
 /**
- * Gracefully close the server on SIGTERM / SIGINT.
- * Gives in-flight requests and socket events up to 10 s to finish.
- *
- * @param {number} [code=0] Process exit code
+ * @param {number} [code=0]
  */
 function shutdown(code = 0) {
   logger.info('Shutdown signal received — draining connections...');
 
-  // Stop accepting new HTTP connections
   server.close(() => {
     logger.info('HTTP server closed');
-
-    // Close all Socket.io connections cleanly
     io.close(() => {
       logger.info('Socket.io server closed');
-      logger.info(`Exiting with code ${code}`);
       process.exit(code);
     });
   });
 
-  // Hard kill if graceful shutdown takes too long (e.g. stuck sockets)
   setTimeout(() => {
     logger.warn('Graceful shutdown timed out — forcing exit');
     process.exit(1);
-  }, 10_000).unref(); // .unref() so this timer doesn't prevent natural exit
+  }, 10_000).unref();
 }
 
 process.on('SIGTERM', () => shutdown(0));
-process.on('SIGINT', () => shutdown(0));
+process.on('SIGINT',  () => shutdown(0));
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 server.listen(config.PORT, () => {
   logger.info(
-    {
-      port: config.PORT,
-      env: config.NODE_ENV,
-      corsOrigin: config.CORS_ORIGIN,
-    },
+    { port: config.PORT, env: config.NODE_ENV, corsOrigin: config.CORS_ORIGIN },
     'GeoGuessr server listening'
   );
+
+  // Attempt checkpoint restore after server is listening
+  // so io.to(roomCode).emit() works if resumeFromCheckpoint broadcasts
+  _tryRestoreCheckpoint();
 });
 
-module.exports = { app, server, io }; // exported for potential integration testing
+module.exports = { app, server, io };

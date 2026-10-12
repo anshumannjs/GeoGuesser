@@ -14,25 +14,64 @@
   <link  rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-  <!-- Mapillary JS SDK -->
-<link  rel="stylesheet" href="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css" />
-<script src="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js"></script>
+  <!-- Mapillary -->
+  <link  rel="stylesheet" href="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css" />
+  <script src="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js"></script>
 
-  <!-- Socket.io client -->
+  <!-- Socket.io client (served by the Node server automatically) -->
   <script src="/socket.io/socket.io.js"></script>
 
-  <!-- Mapillary token — injected by hostApp on init -->
+  <!-- Mapillary token injected at request time by server/index.js -->
+  <script>
+    window.MAPILLARY_CLIENT_TOKEN = '__MAPILLARY_CLIENT_TOKEN__';
+  </script>
+
   <style>
     /* ── Base ──────────────────────────────────────────────────── */
     body { overflow: hidden; user-select: none; }
 
-    /* All screens hidden by default */
+    #screen-auth,
     #screen-lobby,
     #screen-countdown,
     #screen-round,
     #screen-reveal,
     #screen-leaderboard,
     #screen-gameover { display: none; height: 100vh; }
+
+    /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+       AUTH SCREEN (password prompt)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+    #screen-auth {
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2rem;
+      background: var(--ink);
+    }
+    .auth-card {
+      width: 100%;
+      max-width: 400px;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+    .auth-title {
+      font-family: var(--font-display);
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .auth-subtitle {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      margin-top: -0.75rem;
+    }
+    #auth-error {
+      font-size: 0.8rem;
+      color: var(--red);
+      text-align: center;
+    }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        LOBBY
@@ -126,24 +165,24 @@
     }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-       ROUND (panorama + sidebar)
+       ROUND
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-    #screen-round {
-      flex-direction: row;
-    }
+    #screen-round { flex-direction: row; }
+
     #host-pano-container {
       flex: 1;
       position: relative;
       background: #000;
       overflow: hidden;
+      min-height: 0;
     }
     #host-pannellum-viewer,
     #host-mapillary-viewer {
       width: 100%;
       height: 100%;
+      position: absolute;
+      inset: 0;
     }
-
-    /* Round info bar at bottom of pano */
     #pano-info-bar {
       position: absolute;
       bottom: 0;
@@ -206,9 +245,6 @@
       color: var(--red);
       animation: pulse-danger 500ms ease-in-out infinite alternate;
     }
-    #host-round-chip { font-size: 0.75rem; }
-
-    /* Guess counter */
     #host-guess-section {
       padding: 1.25rem;
       border-bottom: 1px solid var(--border);
@@ -233,7 +269,6 @@
       font-size: 1.25rem;
       color: var(--text-secondary);
     }
-    /* Guess progress bar */
     #host-guess-bar-wrap {
       width: 100%;
       height: 6px;
@@ -248,17 +283,12 @@
       border-radius: 3px;
       transition: width 400ms ease;
     }
-
-    /* Mini map in sidebar */
     #host-mini-map-wrap {
       flex: 1;
       position: relative;
       overflow: hidden;
     }
-    #host-world-mini-map {
-      width: 100%;
-      height: 100%;
-    }
+    #host-world-mini-map { width: 100%; height: 100%; }
     #host-campus-mini-wrap {
       width: 100%;
       height: 100%;
@@ -277,8 +307,6 @@
       height: 100%;
       pointer-events: none;
     }
-
-    /* Host control footer */
     #host-controls {
       padding: 1rem 1.25rem;
       border-top: 1px solid var(--border);
@@ -290,11 +318,7 @@
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        REVEAL
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-    #screen-reveal {
-      flex-direction: column;
-    }
-
-    /* Top bar */
+    #screen-reveal { flex-direction: column; }
     #reveal-topbar {
       flex-shrink: 0;
       padding: 1rem 2rem;
@@ -315,25 +339,18 @@
       font-family: var(--font-display);
     }
     #reveal-next-btn { min-width: 140px; }
-
-    /* Main reveal area */
     #reveal-main {
       flex: 1;
       display: flex;
       flex-direction: row;
       overflow: hidden;
     }
-
-    /* Map takes most of the reveal screen */
     #reveal-map-section {
       flex: 1;
       position: relative;
       overflow: hidden;
     }
-    #host-reveal-world-map {
-      width: 100%;
-      height: 100%;
-    }
+    #host-reveal-world-map { width: 100%; height: 100%; }
     #host-reveal-campus-wrap {
       width: 100%;
       height: 100%;
@@ -352,8 +369,6 @@
       height: 100%;
       pointer-events: none;
     }
-
-    /* Podium sidebar on reveal */
     #reveal-podium-sidebar {
       width: 300px;
       flex-shrink: 0;
@@ -391,13 +406,9 @@
       from { opacity: 0; transform: translateX(20px); }
       to   { opacity: 1; transform: translateX(0); }
     }
-    .podium-medal {
-      font-size: 1.75rem;
-      line-height: 1;
-      flex-shrink: 0;
-    }
-    .podium-info { flex: 1; min-width: 0; }
-    .podium-nick {
+    .podium-medal { font-size: 1.75rem; line-height: 1; flex-shrink: 0; }
+    .podium-info  { flex: 1; min-width: 0; }
+    .podium-nick  {
       font-family: var(--font-display);
       font-weight: 600;
       font-size: 0.95rem;
@@ -405,40 +416,16 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .podium-dist {
-      font-size: 0.78rem;
-      color: var(--text-secondary);
-      margin-top: 0.1rem;
-    }
-    .podium-pts {
-      font-family: var(--font-display);
-      font-size: 1rem;
-      font-weight: 700;
-      color: var(--accent);
-      flex-shrink: 0;
-    }
-
-    /* Divider in reveal sidebar */
-    .reveal-divider {
-      height: 1px;
-      background: var(--border);
-    }
-
-    /* Round stats */
+    .podium-dist  { font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.1rem; }
+    .podium-pts   { font-family: var(--font-display); font-size: 1rem; font-weight: 700; color: var(--accent); flex-shrink: 0; }
+    .reveal-divider { height: 1px; background: var(--border); }
     .reveal-stat-row {
       display: flex;
       justify-content: space-between;
       align-items: baseline;
     }
-    .reveal-stat-label {
-      font-size: 0.8rem;
-      color: var(--text-secondary);
-    }
-    .reveal-stat-value {
-      font-family: var(--font-display);
-      font-weight: 600;
-      font-size: 0.9rem;
-    }
+    .reveal-stat-label { font-size: 0.8rem; color: var(--text-secondary); }
+    .reveal-stat-value { font-family: var(--font-display); font-weight: 600; font-size: 0.9rem; }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        LEADERBOARD
@@ -459,10 +446,7 @@
       font-size: 2rem;
       font-weight: 700;
     }
-    #lb-subtitle {
-      font-size: 1rem;
-      color: var(--text-secondary);
-    }
+    #lb-subtitle { font-size: 1rem; color: var(--text-secondary); }
     #host-lb-list {
       flex: 1;
       display: grid;
@@ -471,21 +455,11 @@
       align-content: start;
       overflow: hidden;
     }
-    /* Make leaderboard rows bigger for projector readability */
-    #host-lb-list .lb-row {
-      padding: 0.75rem 1rem;
-      grid-template-columns: 2.5rem 1fr auto auto;
-    }
-    #host-lb-list .lb-pos   { font-size: 1rem; }
-    #host-lb-list .lb-nick  { font-size: 1rem; }
+    #host-lb-list .lb-row { padding: 0.75rem 1rem; grid-template-columns: 2.5rem 1fr auto auto; }
+    #host-lb-list .lb-pos       { font-size: 1rem; }
+    #host-lb-list .lb-nick      { font-size: 1rem; }
     #host-lb-list .lb-total-pts { font-size: 1.1rem; }
     #host-lb-list .lb-round-pts { font-size: 0.875rem; }
-
-    #lb-next-btn-wrap {
-      flex-shrink: 0;
-      display: flex;
-      justify-content: flex-end;
-    }
 
     /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        GAME OVER
@@ -520,36 +494,14 @@
       animation: podium-in 500ms ease forwards;
       opacity: 0;
     }
-    .gameover-podium-entry:nth-child(1) {
-      background: #1e1a00;
-      border: 1px solid #4a3d00;
-      animation-delay: 300ms;
-    }
-    .gameover-podium-entry:nth-child(2) {
-      background: #131313;
-      border: 1px solid var(--border);
-      animation-delay: 500ms;
-    }
-    .gameover-podium-entry:nth-child(3) {
-      background: #17120a;
-      border: 1px solid #3d2510;
-      animation-delay: 700ms;
-    }
-    .gameover-medal { font-size: 2.5rem; }
-    .gameover-nick {
-      flex: 1;
-      font-family: var(--font-display);
-      font-size: 1.5rem;
-      font-weight: 700;
-    }
-    .gameover-score {
-      font-family: var(--font-display);
-      font-size: 1.75rem;
-      font-weight: 700;
-      color: var(--accent);
-    }
+    .gameover-podium-entry:nth-child(1) { background:#1e1a00; border:1px solid #4a3d00; animation-delay:300ms; }
+    .gameover-podium-entry:nth-child(2) { background:#131313; border:1px solid var(--border); animation-delay:500ms; }
+    .gameover-podium-entry:nth-child(3) { background:#17120a; border:1px solid #3d2510; animation-delay:700ms; }
+    .gameover-medal  { font-size: 2.5rem; }
+    .gameover-nick   { flex:1; font-family:var(--font-display); font-size:1.5rem; font-weight:700; }
+    .gameover-score  { font-family:var(--font-display); font-size:1.75rem; font-weight:700; color:var(--accent); }
 
-    /* Leaflet tooltip for reveal */
+    /* Leaflet tooltip */
     .reveal-tooltip {
       background: rgba(0,0,0,0.8) !important;
       border: 1px solid var(--border) !important;
@@ -562,23 +514,69 @@
       padding: 3px 8px !important;
     }
     .reveal-tooltip::before { display: none !important; }
-    .reveal-tooltip--answer {
-      border-color: var(--red) !important;
-      color: var(--red) !important;
-    }
+    .reveal-tooltip--answer { border-color: var(--red) !important; color: var(--red) !important; }
   </style>
 </head>
 
 <body>
 
 <!-- ══════════════════════════════════════════════════════
+     SCREEN: AUTH (password prompt)
+═══════════════════════════════════════════════════════ -->
+<div id="screen-auth" class="flex">
+  <div style="text-align:center">
+    <div class="logo-mark" style="font-size:1.5rem;margin-bottom:0.5rem">📍 GeoGuessr</div>
+    <p style="color:var(--text-secondary);font-size:0.875rem">Host Display</p>
+  </div>
+
+  <div class="auth-card panel">
+    <div>
+      <p class="auth-title">Host Login</p>
+      <p class="auth-subtitle">Enter the admin password to create the game room</p>
+    </div>
+
+    <div class="flex-col gap-2">
+      <label class="t-label" for="input-host-nick">Your display name</label>
+      <input
+        id="input-host-nick"
+        class="input"
+        type="text"
+        placeholder="Host"
+        maxlength="20"
+        value="Host"
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+
+    <div class="flex-col gap-2">
+      <label class="t-label" for="input-password">Admin Password</label>
+      <input
+        id="input-password"
+        class="input"
+        type="password"
+        placeholder="Enter password"
+        autocomplete="current-password"
+      />
+    </div>
+
+    <button id="btn-auth" class="btn btn-accent btn-lg">Enter</button>
+
+    <p id="auth-error" class="hidden"
+       style="font-size:0.8rem;color:var(--red);text-align:center"></p>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════
      SCREEN: LOBBY
 ═══════════════════════════════════════════════════════ -->
 <div id="screen-lobby" class="flex">
-
   <div style="text-align:center">
     <div class="logo-mark" style="font-size:1.5rem;margin-bottom:0.5rem">📍 GeoGuessr</div>
-    <p style="color:var(--text-secondary)">Join at <span id="lobby-join-url" style="color:var(--text-primary)"></span></p>
+    <p style="color:var(--text-secondary)">
+      Join at <span id="lobby-join-url" style="color:var(--text-primary)"></span>
+    </p>
   </div>
 
   <div class="lobby-code-wrap">
@@ -590,11 +588,8 @@
 
   <div class="lobby-bottom">
     <p id="lobby-player-count" class="t-label">0 players joined</p>
-    <button id="btn-start" class="btn btn-accent btn-lg">
-      Start Game
-    </button>
+    <button id="btn-start" class="btn btn-accent btn-lg">Start Game</button>
   </div>
-
 </div>
 
 
@@ -612,11 +607,9 @@
 ═══════════════════════════════════════════════════════ -->
 <div id="screen-round" class="flex">
 
-  <!-- Panorama -->
-  <div id="host-pano-container" style="flex:1;position:relative;background:#000;overflow:hidden;min-height:0;">
-    <div id="host-pannellum-viewer" style="width:100%;height:100%;position:absolute;inset:0;"></div>
-    <div id="host-mapillary-viewer" style="width:100%;height:100%;position:absolute;inset:0;"></div>
-
+  <div id="host-pano-container">
+    <div id="host-pannellum-viewer"></div>
+    <div id="host-mapillary-viewer"></div>
     <div id="pano-info-bar">
       <div>
         <p class="pano-round-label" id="pano-round-label">Round 1 of 10</p>
@@ -626,10 +619,7 @@
     </div>
   </div>
 
-  <!-- Sidebar -->
   <div id="host-sidebar">
-
-    <!-- Timer -->
     <div id="host-timer-section">
       <div class="host-timer-row">
         <span class="t-label">Time Remaining</span>
@@ -640,7 +630,6 @@
       </div>
     </div>
 
-    <!-- Guess counter -->
     <div id="host-guess-section">
       <p class="t-label">Guesses Submitted</p>
       <div class="guess-counter-wrap">
@@ -652,7 +641,6 @@
       </div>
     </div>
 
-    <!-- Mini map -->
     <div id="host-mini-map-wrap">
       <div id="host-world-mini-map"></div>
       <div id="host-campus-mini-wrap">
@@ -661,13 +649,11 @@
       </div>
     </div>
 
-    <!-- Host controls -->
     <div id="host-controls">
-      <button id="btn-end-round-early" class="btn btn-ghost" title="End round now">
+      <button id="btn-end-round-early" class="btn btn-ghost">
         End Round Early
       </button>
     </div>
-
   </div>
 </div>
 
@@ -676,22 +662,15 @@
      SCREEN: REVEAL
 ═══════════════════════════════════════════════════════ -->
 <div id="screen-reveal" class="flex">
-
-  <!-- Top bar -->
   <div id="reveal-topbar">
     <div>
       <p id="reveal-round-label" class="t-label"></p>
       <h2 id="reveal-location-label" class="t-display" style="font-size:1.75rem">—</h2>
     </div>
-    <button id="reveal-next-btn" class="btn btn-accent">
-      Next →
-    </button>
+    <button id="reveal-next-btn" class="btn btn-accent">Next →</button>
   </div>
 
-  <!-- Main area -->
   <div id="reveal-main">
-
-    <!-- Map -->
     <div id="reveal-map-section">
       <div id="host-reveal-world-map"></div>
       <div id="host-reveal-campus-wrap">
@@ -700,17 +679,13 @@
       </div>
     </div>
 
-    <!-- Podium sidebar -->
     <div id="reveal-podium-sidebar">
       <p class="podium-title">Top Guessers</p>
       <div id="reveal-podium-list"></div>
-
       <div class="reveal-divider"></div>
-
       <p class="podium-title">Round Stats</p>
       <div id="reveal-stats"></div>
     </div>
-
   </div>
 </div>
 
@@ -719,19 +694,14 @@
      SCREEN: LEADERBOARD
 ═══════════════════════════════════════════════════════ -->
 <div id="screen-leaderboard" class="flex">
-
   <div id="lb-header">
     <div>
       <h2 id="lb-title" class="t-display">Leaderboard</h2>
       <p id="lb-subtitle" class="t-label" style="margin-top:0.25rem"></p>
     </div>
-    <button id="lb-next-btn" class="btn btn-accent">
-      Next Round →
-    </button>
+    <button id="lb-next-btn" class="btn btn-accent">Next Round →</button>
   </div>
-
   <div id="host-lb-list"></div>
-
 </div>
 
 
@@ -749,7 +719,7 @@
 <div class="toast-container" id="toast-container"></div>
 
 
-<!-- Scripts -->
+<!-- Scripts (order matters — constants first, then shared, then app) -->
 <script src="/js/constants.js"></script>
 <script src="/js/socketClient.js"></script>
 <script src="/js/worldMapView.js"></script>

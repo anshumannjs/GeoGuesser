@@ -28,8 +28,18 @@ const WorldMapView = (() => {
 
   // ── Tile layer URL (OpenStreetMap — no API key required) ──────────────────
 
-  const OSM_TILE = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const OSM_TILE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+
+  // const OSM_TILE = 'https://{s}://{z}/{x}/{y}{r}.png';
+  // const OSM_ATTR = '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>';
+
+  // const OSM_TILE = 'https://{s}://{z}/{x}/{y}{r}.png';
+  // const OSM_ATTR = '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>';
+
+  // const OSM_TILE = 'https://stadiamaps.com{z}/{x}/{y}{r}.png';
+  // const OSM_ATTR = '&copy; <a href="https://stadiamaps.com">Stadia Maps</a> &copy; <a href="https://stamen.com">Stamen Design</a> &copy; <a href="https://openmaptiles.org">OpenMapTiles</a> &copy; <a href="https://openstreetmap.org">OpenStreetMap</a>';
+
 
   /**
    * Dark-styled tile layer from CartoDB — matches our dark UI theme.
@@ -93,10 +103,11 @@ const WorldMapView = (() => {
     });
 
     // Dark tile layer
-    L.tileLayer(DARK_TILE, {
-      attribution: DARK_ATTR,
+    L.tileLayer(OSM_TILE, {
+      attribution: OSM_ATTR,
       subdomains: 'abcd',
       maxZoom: 19,
+      referrerPolicy: 'no-referrer-when-downgrade' // Ensures the referrer is passed to OSM
     }).addTo(_guessMap);
 
     // Click handler — place or move pin
@@ -183,10 +194,11 @@ const WorldMapView = (() => {
       attributionControl: false,
     });
 
-    L.tileLayer(DARK_TILE, {
-      attribution: DARK_ATTR,
+    L.tileLayer(OSM_TILE, {
+      attribution: OSM_ATTR,
       subdomains: 'abcd',
       maxZoom: 10,
+      referrerPolicy: 'no-referrer-when-downgrade' // Ensures the referrer is passed to OSM
     }).addTo(_revealMap);
 
     _revealLayers = L.layerGroup().addTo(_revealMap);

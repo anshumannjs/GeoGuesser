@@ -7,13 +7,17 @@ const {
   EVENTS,
   GAME_STATE,
   ROLE,
-  MAX_PLAYERS,
 } = require('./constants');
-const { ValidationError, AuthError, AppError } = require('./errors');
+const {
+  ValidationError,
+  AuthError,
+  AppError,
+  ERROR_CODE,
+} = require('./errors');
 const rooms     = require('./rooms');
 const gameState = require('./gameState');
 
-// ─── Zod Schemas (input validation) ──────────────────────────────────────────
+// ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
 const nicknameSchema = z
   .string()
@@ -43,7 +47,8 @@ const guessCoordSchema = z.union([worldCoordSchema, pixelCoordSchema]);
 // ─── Payload Schemas ──────────────────────────────────────────────────────────
 
 const schemas = {
-  [EVENTS.C_HOST_CREATE]: z.object({
+  [EVENTS.C_ADMIN_AUTH]: z.object({
+    password: z.string().min(1),
     nickname: nicknameSchema,
   }),
 
@@ -52,10 +57,11 @@ const schemas = {
     nickname: nicknameSchema,
   }),
 
-  [EVENTS.C_GUESS_SUBMIT]: z.object({
-    roomCode:  roomCodeSchema,
-    roundIndex: z.number().int().min(0),
-    coord:     guessCoordSchema,
+  [EVENTS.C_REJOIN]: z.object({
+    playerId: z.string().min(1),
+    nickname: nicknameSchema,
+    // adminToken is optional — only host sends it
+    adminToken: z.string().optional(),
   }),
 
   [EVENTS.C_HOST_START]: z.object({
@@ -65,35 +71,41 @@ const schemas = {
   [EVENTS.C_HOST_NEXT]: z.object({
     roomCode: roomCodeSchema,
   }),
+
+  [EVENTS.C_HOST_END_ROUND]: z.object({
+    roomCode: roomCodeSchema,
+  }),
+
+  [EVENTS.C_GUESS_SUBMIT]: z.object({
+    roomCode:   roomCodeSchema,
+    roundIndex: z.number().int().min(0),
+    coord:      guessCoordSchema,
+  }),
 };
 
 // ─── Validation Helper ────────────────────────────────────────────────────────
 
 /**
- * Validate a socket event payload against its schema.
- * Throws ValidationError with structured issues on failure.
+ * Validate a socket event payload against its registered schema.
  *
  * @template T
- * @param {string} event   Event name (key into schemas map)
- * @param {*}      payload Raw payload from client
- * @returns {T}            Parsed + coerced payload
+ * @param {string} event
+ * @param {*}      payload
+ * @returns {T}
  */
 function _validate(event, payload) {
   const schema = schemas[event];
   if (!schema) {
-    // No schema registered — pass through (should not happen in practice)
-    logger.warn({ event }, 'No validation schema found for event');
+    logger.warn({ event }, 'No validation schema for event — passing through');
     return payload;
   }
-
   const result = schema.safeParse(payload);
   if (!result.success) {
     throw new ValidationError(
-      `Invalid payload for event "${event}"`,
+      `Invalid payload for "${event}"`,
       result.error.issues
     );
   }
-
   return result.data;
 }
 
@@ -103,46 +115,38 @@ function _validate(event, payload) {
  * Send a structured error to a single socket.
  *
  * @param {SocketIO.Socket} socket
- * @param {AppError|Error}  err
+ * @param {Error}           err
  */
 function _emitError(socket, err) {
-  const isAppError = err instanceof AppError;
-
-  if (!isAppError) {
-    logger.error({ err }, 'Unexpected non-AppError in socket handler');
-  }
+  const isApp = err instanceof AppError;
+  if (!isApp) logger.error({ err }, 'Unexpected non-AppError in handler');
 
   socket.emit(EVENTS.S_ERROR, {
-    code:    isAppError ? err.code    : 'INTERNAL_SERVER_ERROR',
-    message: isAppError ? err.message : 'An unexpected error occurred',
-    issues:  isAppError && err.issues ? err.issues : undefined,
+    code:    isApp ? err.code    : 'INTERNAL_SERVER_ERROR',
+    message: isApp ? err.message : 'An unexpected error occurred',
+    issues:  isApp && err.issues ? err.issues : undefined,
   });
 }
 
 // ─── Handler Wrapper ──────────────────────────────────────────────────────────
 
 /**
- * Wrap a socket event handler with:
- *   - Payload validation
- *   - Structured error handling
- *   - Per-event logging
+ * Wrap a socket event handler with validation + structured error handling.
  *
  * @param {SocketIO.Socket} socket
  * @param {string}          event
  * @param {Function}        handler  async (parsedPayload) => void
- * @returns {Function}               The wrapped listener to pass to socket.on()
+ * @returns {Function}
  */
 function _wrap(socket, event, handler) {
   return async (payload) => {
-    const socketId = socket.id;
-    logger.debug({ event, socketId, payload }, 'Socket event received');
-
+    logger.debug({ event, socketId: socket.id, payload }, 'Socket event received');
     try {
       const parsed = _validate(event, payload);
       await handler(parsed);
     } catch (err) {
       logger.warn(
-        { event, socketId, err: { code: err.code, message: err.message } },
+        { event, socketId: socket.id, code: err.code, message: err.message },
         'Socket handler error'
       );
       _emitError(socket, err);
@@ -150,62 +154,66 @@ function _wrap(socket, event, handler) {
   };
 }
 
-// ─── Auth Helper ─────────────────────────────────────────────────────────────
+// ─── Auth Helpers ─────────────────────────────────────────────────────────────
 
 /**
- * Assert that the socket is the host of the given room.
- * Throws AuthError if not.
+ * Assert socket belongs to the host of the singleton room.
  *
- * @param {string} roomCode
  * @param {string} socketId
  */
-function _assertHost(roomCode, socketId) {
-  if (!rooms.isHost(roomCode, socketId)) {
+function _assertHost(socketId) {
+  if (!rooms.isHost(socketId)) {
     throw new AuthError('Only the host can perform this action');
   }
 }
 
 // ─── Connection Rate Limiting ─────────────────────────────────────────────────
 
-/**
- * Simple in-memory rate limiter for socket connections.
- * Tracks connection timestamps per IP.
- *
- * @type {Map<string, number[]>}
- */
+/** @type {Map<string, number[]>} */
 const _connectionTimestamps = new Map();
-const CONNECTION_WINDOW_MS  = 60_000; // 1 minute
-const MAX_CONNECTIONS_PER_WINDOW = 10;
+const CONNECTION_WINDOW_MS       = 60_000;
+const MAX_CONNECTIONS_PER_WINDOW = 15; // increased slightly for event wifi NAT
 
 /**
- * Check whether an IP has exceeded the connection rate limit.
- *
  * @param {string} ip
- * @returns {boolean}  true if rate limited (should reject)
+ * @returns {boolean} true = rate limited
  */
-function _isConnectionRateLimited(ip) {
+function _isRateLimited(ip) {
+  if (config.NODE_ENV === 'test') return false;
+
   const now  = Date.now();
   const prev = (_connectionTimestamps.get(ip) ?? []).filter(
     (t) => now - t < CONNECTION_WINDOW_MS
   );
-
   if (prev.length >= MAX_CONNECTIONS_PER_WINDOW) return true;
-
   prev.push(now);
   _connectionTimestamps.set(ip, prev);
   return false;
 }
 
+// ─── State Sync Helper ────────────────────────────────────────────────────────
+
+/**
+ * Send S_GAME_STATE_SYNC to a single socket so a reconnecting client
+ * can snap to the current game state without waiting for the next broadcast.
+ *
+ * @param {SocketIO.Socket} socket
+ */
+function _sendStateSync(socket) {
+  const sync = gameState.buildStateSync();
+  if (!sync) return;
+  socket.emit(EVENTS.S_GAME_STATE_SYNC, sync);
+}
+
 // ─── Main Registration ────────────────────────────────────────────────────────
 
 /**
- * Register all socket event handlers on the Socket.io server.
- * Called once from index.js after the io instance is created.
+ * Register all socket event handlers.
+ * Called once from server/index.js.
  *
  * @param {SocketIO.Server} io
  */
 function registerSocketHandlers(io) {
-  // Initialise game state (loads rounds from disk)
   gameState.initialise();
 
   io.on('connection', (socket) => {
@@ -213,13 +221,13 @@ function registerSocketHandlers(io) {
       ?? socket.handshake.address
       ?? 'unknown';
 
-    // ── Connection rate limit ────────────────────────────────────────────
+    // ── Rate limit ───────────────────────────────────────────────────────
 
-    if (config.NODE_ENV!=='test' && process.env.ROOM_CODE!=null && _isConnectionRateLimited(ip)) {
-      logger.warn({ ip, socketId: socket.id }, 'Connection rate limited — disconnecting');
+    if (_isRateLimited(ip)) {
+      logger.warn({ ip, socketId: socket.id }, 'Rate limited — disconnecting');
       socket.emit(EVENTS.S_ERROR, {
         code:    'RATE_LIMITED',
-        message: 'Too many connections. Please wait a moment and try again.',
+        message: 'Too many connections. Please wait a moment.',
       });
       socket.disconnect(true);
       return;
@@ -228,131 +236,208 @@ function registerSocketHandlers(io) {
     logger.info({ socketId: socket.id, ip }, 'Socket connected');
 
     // ────────────────────────────────────────────────────────────────────
-    // C_HOST_CREATE — Host creates a new room
+    // C_ADMIN_AUTH
+    // Host submits admin password to get/create the singleton room.
+    // On success the host gets back the room code + a stable adminToken
+    // that is stored in sessionStorage for future reconnections.
     // ────────────────────────────────────────────────────────────────────
 
     socket.on(
-      EVENTS.C_HOST_CREATE,
-      _wrap(socket, EVENTS.C_HOST_CREATE, ({ nickname }) => {
-        const { room, host } = rooms.createRoom(socket.id, nickname);
+      EVENTS.C_ADMIN_AUTH,
+      _wrap(socket, EVENTS.C_ADMIN_AUTH, ({ password, nickname }) => {
 
-        // Host joins their own Socket.io room
+        // Wrong password
+        if (password !== config.ADMIN_PASSWORD) {
+          logger.warn({ socketId: socket.id }, 'Admin auth failed — wrong password');
+          socket.emit(EVENTS.S_ADMIN_AUTH_FAIL, {
+            message: 'Incorrect password.',
+          });
+          return;
+        }
+
+        let room;
+        let host;
+        let adminToken;
+
+        if (rooms.roomExists()) {
+          // Room already exists — this is a fresh host tab that passed auth
+          // but doesn't have a saved session yet (e.g. opened a second browser)
+          // We do not allow a second host — tell them to use the existing session
+          logger.warn({ socketId: socket.id }, 'Room already exists — rejecting second host');
+          socket.emit(EVENTS.S_ADMIN_AUTH_FAIL, {
+            message: 'A room is already active. If you are the host, use your saved session to rejoin.',
+          });
+          return;
+        }
+
+        // Create the singleton room
+        const result = rooms.createRoom(socket.id, nickname);
+        room        = result.room;
+        host        = result.host;
+        adminToken  = result.adminToken;
+
+        socket.join(room.code);
+
+        socket.emit(EVENTS.S_ADMIN_AUTH_OK, {
+          roomCode:    room.code,
+          playerId:    host.id,
+          adminToken,              // stored in sessionStorage by hostApp.js
+          players:     rooms.getPlayerSnapshot(),
+        });
+
+        logger.info({ roomCode: room.code, hostNickname: nickname }, 'Room created via admin auth');
+      })
+    );
+
+    // ────────────────────────────────────────────────────────────────────
+    // C_REJOIN
+    // Sent by any client (host or player) on page refresh/reconnect.
+    // Uses playerId from sessionStorage — no form re-entry needed.
+    // Host additionally sends adminToken for identity verification.
+    // ────────────────────────────────────────────────────────────────────
+
+    socket.on(
+      EVENTS.C_REJOIN,
+      _wrap(socket, EVENTS.C_REJOIN, ({ playerId, nickname, adminToken }) => {
+
+        // ── Host rejoin ──────────────────────────────────────────────────
+        if (adminToken) {
+          const { room, host } = rooms.reconnectHost(socket.id, adminToken);
+          socket.join(room.code);
+
+          socket.emit(EVENTS.S_ROOM_JOINED, {
+            roomCode:    room.code,
+            playerId:    host.id,
+            role:        ROLE.HOST,
+            players:     rooms.getPlayerSnapshot(),
+            reconnected: true,
+            gameState:   room.state,
+          });
+
+          // Send full state so host display can snap to current screen
+          _sendStateSync(socket);
+
+          // Notify players host is back
+          socket.to(room.code).emit(EVENTS.S_ROOM_PLAYERS, {
+            players: rooms.getPlayerSnapshot(),
+          });
+
+          logger.info({ roomCode: room.code }, 'Host rejoined via C_REJOIN');
+          return;
+        }
+
+        // ── Player rejoin ────────────────────────────────────────────────
+        const result = rooms.reconnectPlayer(socket.id, playerId, nickname);
+
+        if (!result) {
+          // Could not match — fall back: tell client to show join form
+          socket.emit(EVENTS.S_ERROR, {
+            code:    ERROR_CODE.PLAYER_NOT_FOUND,
+            message: 'Session not found. Please join with your room code and nickname.',
+          });
+          return;
+        }
+
+        const { room, player } = result;
         socket.join(room.code);
 
         socket.emit(EVENTS.S_ROOM_JOINED, {
-          roomCode:   room.code,
-          playerId:   host.id,
-          role:       ROLE.HOST,
-          players:    rooms.getPlayerSnapshot(room.code),
-          totalRounds: null, // not known until game starts
+          roomCode:    room.code,
+          playerId:    player.id,
+          role:        ROLE.PLAYER,
+          players:     rooms.getPlayerSnapshot(),
+          reconnected: true,
+          gameState:   room.state,
+        });
+
+        // Send full state so player can snap to current screen
+        _sendStateSync(socket);
+
+        // Notify others this player is back online
+        socket.to(room.code).emit(EVENTS.S_ROOM_PLAYERS, {
+          players: rooms.getPlayerSnapshot(),
         });
 
         logger.info(
-          { roomCode: room.code, hostNickname: nickname },
-          'Host created room'
+          { roomCode: room.code, playerId: player.id, nickname: player.nickname },
+          'Player rejoined via C_REJOIN'
         );
       })
     );
 
     // ────────────────────────────────────────────────────────────────────
-    // C_JOIN — Player joins an existing room
+    // C_JOIN
+    // Fresh player join — only valid while game is in LOBBY state.
+    // Once game starts, players must use C_REJOIN with their saved playerId.
     // ────────────────────────────────────────────────────────────────────
 
     socket.on(
       EVENTS.C_JOIN,
       _wrap(socket, EVENTS.C_JOIN, ({ roomCode, nickname }) => {
+        const { room, player } = rooms.joinRoom(socket.id, nickname);
 
-        // ── Attempt reconnection first ───────────────────────────────
+        socket.join(room.code);
 
-        const reconnected = rooms.reconnectPlayer(roomCode, socket.id, nickname);
-
-        if (reconnected) {
-  const { room, player } = reconnected;
-  socket.join(roomCode);
-
-  // Get current game session info if game is active
-  let currentRoundPayload = null;
-  try {
-    const session = gameState.getSession(roomCode); // we'll add this getter
-    if (session && session.currentIndex >= 0) {
-      const round = session.sequence[session.currentIndex];
-      currentRoundPayload = {
-        round:       sanitiseRoundForClient(round),
-        roundIndex:  session.currentIndex,
-        totalRounds: session.sequence.length,
-        endsAt:      session.roundEndsAt,
-        durationMs:  session.roundDurationMs ?? 0,
-      };
-    }
-  } catch (_) {}
-
-  // Send them back their current game state so they can re-render
-  const currentRoom = rooms.getRoom(roomCode);
-  socket.emit(EVENTS.S_ROOM_JOINED, {
-    roomCode,
-    playerId:            player.id,
-    role:                player.role,
-    players:             rooms.getPlayerSnapshot(roomCode),
-    reconnected:         true,
-    gameState:           currentRoom.state,
-    currentRoundPayload, // ← send current round so host can resync
-  });
-  return;
-}
-
-        // ── Fresh join ───────────────────────────────────────────────
-
-        const { room, player } = rooms.joinRoom(roomCode, socket.id, nickname);
-        socket.join(roomCode);
-
-        // Confirm join to the new player
         socket.emit(EVENTS.S_ROOM_JOINED, {
-          roomCode,
+          roomCode:    room.code,
           playerId:    player.id,
           role:        ROLE.PLAYER,
-          players:     rooms.getPlayerSnapshot(roomCode),
+          players:     rooms.getPlayerSnapshot(),
           reconnected: false,
           gameState:   GAME_STATE.LOBBY,
         });
 
-        // Broadcast updated player list to everyone else in the room
-        socket.to(roomCode).emit(EVENTS.S_ROOM_PLAYERS, {
-          players: rooms.getPlayerSnapshot(roomCode),
+        socket.to(room.code).emit(EVENTS.S_ROOM_PLAYERS, {
+          players: rooms.getPlayerSnapshot(),
         });
 
         logger.info(
-          { roomCode, playerId: player.id, nickname, totalPlayers: room.players.size },
-          'Player joined room'
+          { roomCode: room.code, playerId: player.id, nickname, totalPlayers: room.players.size },
+          'Player joined'
         );
       })
     );
 
     // ────────────────────────────────────────────────────────────────────
-    // C_HOST_START — Host starts the game
+    // C_HOST_START — host starts the game
     // ────────────────────────────────────────────────────────────────────
 
     socket.on(
       EVENTS.C_HOST_START,
       _wrap(socket, EVENTS.C_HOST_START, ({ roomCode }) => {
-        _assertHost(roomCode, socket.id);
-        gameState.startGame(roomCode, io);
+        _assertHost(socket.id);
+        gameState.startGame(io);
       })
     );
 
     // ────────────────────────────────────────────────────────────────────
-    // C_HOST_NEXT — Host manually advances past reveal / leaderboard
+    // C_HOST_NEXT — advance past reveal or leaderboard
     // ────────────────────────────────────────────────────────────────────
 
     socket.on(
       EVENTS.C_HOST_NEXT,
       _wrap(socket, EVENTS.C_HOST_NEXT, ({ roomCode }) => {
-        _assertHost(roomCode, socket.id);
-        gameState.hostAdvance(roomCode, io);
+        _assertHost(socket.id);
+        gameState.hostAdvance(io);
       })
     );
 
     // ────────────────────────────────────────────────────────────────────
-    // C_GUESS_SUBMIT — Player submits a guess for the current round
+    // C_HOST_END_ROUND — force-end an active round early
+    // This is the FIX — separate event from C_HOST_NEXT so there is
+    // no ambiguity about which game state we're operating on.
+    // ────────────────────────────────────────────────────────────────────
+
+    socket.on(
+      EVENTS.C_HOST_END_ROUND,
+      _wrap(socket, EVENTS.C_HOST_END_ROUND, ({ roomCode }) => {
+        _assertHost(socket.id);
+        gameState.forceEndRound(io);
+      })
+    );
+
+    // ────────────────────────────────────────────────────────────────────
+    // C_GUESS_SUBMIT — player submits a guess
     // ────────────────────────────────────────────────────────────────────
 
     socket.on(
@@ -360,32 +445,29 @@ function registerSocketHandlers(io) {
       _wrap(socket, EVENTS.C_GUESS_SUBMIT, ({ roomCode, roundIndex, coord }) => {
         const entry = rooms.getRoomBySocket(socket.id);
 
-        // Ensure this socket actually belongs to the room they claim
-        if (!entry || entry.roomCode !== roomCode) {
+        if (!entry) {
           throw new AuthError('You are not a member of this room');
         }
 
-        // Reject host guesses — host is spectator only
-        const player = rooms.getPlayer(roomCode, entry.playerId);
+        const player = rooms.getPlayer(entry.playerId);
+
         if (player.role === ROLE.HOST) {
           throw new AuthError('The host cannot submit guesses');
         }
 
-        // Stale-round guard: client's roundIndex must match server's current round
-        // Prevents a race where a guess arrives just after the round ended
-        const room = rooms.getRoom(roomCode);
+        const room = rooms.getRoom();
         if (room.state !== GAME_STATE.ROUND_ACTIVE) {
           throw new AuthError('No active round to guess for');
         }
 
-        const result = gameState.submitGuess(
-          roomCode,
-          entry.playerId,
-          coord,
-          io
-        );
+        // Stale-round guard — client roundIndex must match server
+        const session = gameState.getSession();
+        if (session && session.currentIndex !== roundIndex) {
+          throw new AuthError('Guess is for a stale round — ignoring');
+        }
 
-        // Acknowledge to the individual player
+        const result = gameState.submitGuess(entry.playerId, coord, io);
+
         socket.emit(EVENTS.S_GUESS_ACK, {
           accepted:     result.accepted,
           guessCount:   result.guessCount,
@@ -396,7 +478,7 @@ function registerSocketHandlers(io) {
     );
 
     // ────────────────────────────────────────────────────────────────────
-    // disconnect — Clean up on socket drop
+    // disconnect
     // ────────────────────────────────────────────────────────────────────
 
     socket.on('disconnect', (reason) => {
@@ -407,32 +489,27 @@ function registerSocketHandlers(io) {
 
       const { room, player } = result;
 
-      // Notify remaining players that this player went offline
-      // (they stay in the room and can reconnect)
       io.to(room.code).emit(EVENTS.S_ROOM_PLAYERS, {
-        players: rooms.getPlayerSnapshot(room.code),
+        players: rooms.getPlayerSnapshot(),
       });
 
-      // If the host disconnects mid-game, warn the room
       if (player.role === ROLE.HOST) {
         io.to(room.code).emit(EVENTS.S_ERROR, {
           code:    'HOST_DISCONNECTED',
-          message: 'The host has disconnected. Game will resume if they reconnect.',
+          message: 'Host disconnected — game will resume when they return.',
         });
         logger.warn({ roomCode: room.code }, 'Host disconnected mid-game');
       }
     });
 
     // ────────────────────────────────────────────────────────────────────
-    // connect_error — Log Socket.io internal errors
+    // Socket-level error
     // ────────────────────────────────────────────────────────────────────
 
     socket.on('error', (err) => {
       logger.error({ socketId: socket.id, err }, 'Socket-level error');
     });
   });
-
-  // ── Global server-level error logging ─────────────────────────────────────
 
   io.engine.on('connection_error', (err) => {
     logger.error({ err }, 'Socket.io engine connection error');

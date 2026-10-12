@@ -1,11 +1,25 @@
 'use strict';
 
-const logger   = require('./logger');
-const { GAME_STATE, TIMING, EVENTS, ROUND_TYPE, ROLE } = require('./constants');
-const { GameError, ERROR_CODE }  = require('./errors');
-const { loadRounds, buildRoundSequence, getRound, getRoundDuration, sanitiseRoundForClient } = require('./rounds');
+const logger  = require('./logger');
+const config  = require('./config');
+const {
+  GAME_STATE,
+  TIMING,
+  EVENTS,
+  ROUND_TYPE,
+  ROLE,
+} = require('./constants');
+const { GameError, ERROR_CODE } = require('./errors');
+const {
+  loadRounds,
+  buildRoundSequence,
+  getRound,
+  getRoundDuration,
+  sanitiseRoundForClient,
+} = require('./rounds');
 const { scoreRound, buildLeaderboard, buildRevealPayload } = require('./scoring');
 const rooms = require('./rooms');
+const { writeCheckpoint, buildCheckpoint, deleteCheckpoint } = require('./persistence');
 
 // ─── Module-level round data (loaded once at startup) ─────────────────────────
 
@@ -14,7 +28,7 @@ let _campusRounds = null;
 
 /**
  * Load round data from disk.
- * Must be called once before any room can start a game.
+ * Must be called once before any game can start.
  */
 function initialise() {
   const { worldRounds, campusRounds } = loadRounds();
@@ -26,147 +40,256 @@ function initialise() {
   );
 }
 
-// ─── Per-room volatile state ──────────────────────────────────────────────────
-
-/**
- * Stores runtime game state that is not part of the Room object itself.
- * Key: roomCode
- * Value: GameSession
- *
- * @type {Map<string, GameSession>}
- */
-const sessions = new Map();
+// ─── Singleton Session ────────────────────────────────────────────────────────
 
 /**
  * @typedef {Object} GameSession
- * @property {string}    roomCode
- * @property {Round[]}   sequence        Ordered round array for this game
- * @property {number}    currentIndex    0-based index into sequence (-1 = not started)
- * @property {Map<string, RawGuess>} guesses  playerId → guess for current round
- * @property {NodeJS.Timeout|null}  roundTimer
- * @property {NodeJS.Timeout|null}  tickTimer
- * @property {number|null}          roundEndsAt  Unix ms timestamp when round timer expires
+ * @property {Round[]}                sequence
+ * @property {string[]}               roundIds         Ordered round IDs (persist in checkpoint)
+ * @property {number}                 currentIndex     0-based (-1 = not started)
+ * @property {Map<string, RawGuess>}  guesses          playerId → guess for current round
+ * @property {NodeJS.Timeout|null}    tickTimer
+ * @property {NodeJS.Timeout|null}    transitionTimer  The single pending phase-change timer
+ * @property {number|null}            roundEndsAt      Unix ms when current round expires
+ * @property {number}                 roundDurationMs
+ * @property {boolean}                roundClosing     True once the round is guaranteed to end
+ * @property {boolean}                resumed          True if restored from a checkpoint
  */
 
-/**
- * @typedef {Object} RawGuess
- * @property {string} playerId
- * @property {Object} coord
- * @property {number} submittedAt
- */
+/** @type {GameSession|null} */
+let _session = null;
 
 // ─── Session Helpers ──────────────────────────────────────────────────────────
 
 /**
- * Get an existing session or throw.
+ * Get the active session or throw.
  *
- * @param {string} roomCode
  * @returns {GameSession}
  */
-function _getSession(roomCode) {
-  const session = sessions.get(roomCode);
-  if (!session) {
+function _getSession() {
+  if (!_session) {
     throw new GameError(
-      `No active game session for room "${roomCode}"`,
+      'No active game session',
       ERROR_CODE.INVALID_STATE_TRANSITION
     );
   }
-  return session;
+  return _session;
 }
 
 /**
- * Create a fresh session for a room.
+ * Rebuild a sequence from a saved list of round IDs.
+ * Returns null if any ID can no longer be found.
  *
- * @param {string} roomCode
+ * @param {string[]} roundIds
+ * @returns {Round[]|null}
+ */
+function _rebuildSequence(roundIds) {
+  const byId = new Map();
+  for (const r of [..._worldRounds, ..._campusRounds]) byId.set(r.id, r);
+
+  const sequence = [];
+  for (const id of roundIds) {
+    const round = byId.get(id);
+    if (!round) return null;
+    sequence.push(round);
+  }
+  return sequence;
+}
+
+/**
+ * Create a fresh session.
+ *
+ * @param {Object}   [opts]
+ * @param {number}   [opts.resumeFromIndex=-1]  Last completed round index
+ * @param {string[]} [opts.roundIds]            Saved round order to restore
  * @returns {GameSession}
  */
-function _createSession(roomCode) {
-  const sequence = buildRoundSequence(_worldRounds, _campusRounds, {
-    maxWorldRounds:  10,
-    maxCampusRounds: 0,
-    shuffleCampus:   true,
-    shuffleWorld:    true,
-  });
+function _createSession({ resumeFromIndex = -1, roundIds = null } = {}) {
+  // Make sure nothing from an earlier session can still fire
+  _clearTimers();
 
-  /** @type {GameSession} */
-  const session = {
-    roomCode,
+  let sequence = null;
+
+  if (Array.isArray(roundIds) && roundIds.length > 0) {
+    sequence = _rebuildSequence(roundIds);
+    if (!sequence) {
+      logger.warn('Saved round order no longer matches round data — building a new sequence');
+    }
+  }
+
+  if (!sequence) {
+    sequence = buildRoundSequence(_worldRounds, _campusRounds, {
+      maxWorldRounds:  config.MAX_WORLD_ROUNDS,
+      maxCampusRounds: config.MAX_CAMPUS_ROUNDS,
+      shuffleCampus:   true,
+      shuffleWorld:    true,
+    });
+  }
+
+  _session = {
     sequence,
-    currentIndex:  -1,
-    guesses:       new Map(),
-    roundTimer:    null,
-    tickTimer:     null,
-    roundEndsAt:   null,
+    roundIds:        sequence.map((r) => r.id),
+    currentIndex:    resumeFromIndex,
+    guesses:         new Map(),
+    tickTimer:       null,
+    transitionTimer: null,
+    roundEndsAt:     null,
+    roundDurationMs: 0,
+    roundClosing:    false,
+    resumed:         false,
   };
 
-  sessions.set(roomCode, session);
-  return session;
+  return _session;
 }
 
 /**
- * Clear all active timers for a session.
- *
- * @param {GameSession} session
+ * Clear all active timers. Leaves roundEndsAt intact so state syncs
+ * during reveal/leaderboard still have the last value available.
  */
-function _clearTimers(session) {
-  if (session.roundTimer) {
-    clearTimeout(session.roundTimer);
-    session.roundTimer = null;
+function _clearTimers() {
+  if (!_session) return;
+  if (_session.tickTimer) {
+    clearInterval(_session.tickTimer);
+    _session.tickTimer = null;
   }
-  if (session.tickTimer) {
-    clearInterval(session.tickTimer);
-    session.tickTimer = null;
+  if (_session.transitionTimer) {
+    clearTimeout(_session.transitionTimer);
+    _session.transitionTimer = null;
   }
-  session.roundEndsAt = null;
 }
 
 /**
- * Fully tear down a session (called when game ends or room is destroyed).
+ * Schedule the single pending phase-change callback.
+ * - Replaces any previously scheduled one
+ * - Skips silently if the session was destroyed or replaced
+ * - Catches errors so a timer callback can never crash the process
  *
- * @param {string} roomCode
+ * @param {Function} fn
+ * @param {number}   ms
  */
-function destroySession(roomCode) {
-  const session = sessions.get(roomCode);
+function _schedule(fn, ms) {
+  const session = _session;
   if (!session) return;
-  _clearTimers(session);
-  sessions.delete(roomCode);
-  logger.info({ roomCode }, 'Game session destroyed');
+
+  if (session.transitionTimer) {
+    clearTimeout(session.transitionTimer);
+  }
+
+  session.transitionTimer = setTimeout(() => {
+    if (_session !== session) return;
+    session.transitionTimer = null;
+    try {
+      fn();
+    } catch (err) {
+      logger.error({ err }, 'Game timer callback failed');
+    }
+  }, ms);
 }
 
-// ─── State Guards ─────────────────────────────────────────────────────────────
+/**
+ * Destroy the session entirely.
+ */
+function destroySession() {
+  _clearTimers();
+  _session = null;
+  logger.info('Game session destroyed');
+}
+
+// ─── State Guard ──────────────────────────────────────────────────────────────
 
 /**
- * Assert that a room is currently in one of the expected states.
- * Throws GameError if not.
+ * Assert room is in one of the expected states.
  *
  * @param {import('./rooms').Room} room
- * @param {...string}              expectedStates
+ * @param {...string} expectedStates
  */
 function _assertState(room, ...expectedStates) {
   if (!expectedStates.includes(room.state)) {
     throw new GameError(
-      `Invalid state transition: room is in "${room.state}" ` +
-      `but expected one of [${expectedStates.join(', ')}]`,
+      `Invalid state transition: room is "${room.state}", ` +
+      `expected one of [${expectedStates.join(', ')}]`,
       ERROR_CODE.INVALID_STATE_TRANSITION
     );
   }
+}
+
+// ─── Checkpoint Helper ────────────────────────────────────────────────────────
+
+/**
+ * Write a checkpoint at safe boundaries (round end, game over).
+ * Non-blocking — errors are logged but never thrown.
+ *
+ * NOTE: buildCheckpoint() must persist `session.roundIds` so that
+ * resumeFromCheckpoint() can restore the exact same round order.
+ *
+ * @param {import('./rooms').Room} room
+ */
+function _checkpoint(room) {
+  const session    = _session;
+  const adminToken = rooms.getAdminToken();
+  if (!adminToken || !session) return;
+
+  try {
+    const data = buildCheckpoint(room, session, adminToken);
+    Promise.resolve(writeCheckpoint(data)).catch(() => {}); // logged inside writeCheckpoint
+  } catch (err) {
+    logger.error({ err }, 'Failed to build checkpoint');
+  }
+}
+
+// ─── Private Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Connected, non-host players.
+ *
+ * @returns {Object[]}
+ */
+function _connectedPlayers() {
+  const room = rooms.getRoomOrNull();
+  if (!room) return [];
+  return [...room.players.values()].filter(
+    (p) => p.role === ROLE.PLAYER && p.connected !== false
+  );
+}
+
+/**
+ * Count connected non-host players.
+ *
+ * @returns {number}
+ */
+function _activePlayers() {
+  return _connectedPlayers().length;
+}
+
+/**
+ * Count guesses from currently connected players only.
+ *
+ * @param {GameSession} session
+ * @returns {number}
+ */
+function _activeGuessCount(session) {
+  const ids = new Set(_connectedPlayers().map((p) => p.id));
+  let count = 0;
+  for (const playerId of session.guesses.keys()) {
+    if (ids.has(playerId)) count += 1;
+  }
+  return count;
 }
 
 // ─── Game Lifecycle ───────────────────────────────────────────────────────────
 
 /**
- * Start a game for a room.
- * Transitions: LOBBY → ROUND_COUNTDOWN → ROUND_ACTIVE
+ * Start a new game.
+ * Transition: LOBBY → ROUND_COUNTDOWN → ROUND_ACTIVE
  *
- * @param {string}             roomCode
- * @param {SocketIO.Namespace} io        Socket.io server (for broadcasting)
+ * @param {SocketIO.Server} io
  */
-function startGame(roomCode, io) {
+function startGame(io) {
   if (!_worldRounds) {
-    throw new GameError('GameState not initialised — call initialise() first', ERROR_CODE.INTERNAL);
+    throw new GameError('GameState not initialised', ERROR_CODE.INTERNAL);
   }
 
-  const room = rooms.getRoom(roomCode);
+  const room = rooms.getRoom();
   _assertState(room, GAME_STATE.LOBBY);
 
   const playerCount = [...room.players.values()].filter(
@@ -174,65 +297,94 @@ function startGame(roomCode, io) {
   ).length;
 
   if (playerCount < 1) {
-    throw new GameError(
-      'Cannot start a game with no players',
-      ERROR_CODE.NOT_ENOUGH_PLAYERS
-    );
+    throw new GameError('Cannot start with no players', ERROR_CODE.NOT_ENOUGH_PLAYERS);
   }
 
-  const session = _createSession(roomCode);
-  room.state    = GAME_STATE.ROUND_COUNTDOWN;
+  _createSession();
+  room.state = GAME_STATE.ROUND_COUNTDOWN;
 
   logger.info(
-    { roomCode, totalRounds: session.sequence.length, playerCount },
+    { roomCode: room.code, totalRounds: _session.sequence.length, playerCount },
     'Game starting'
   );
 
-  // Brief countdown before first round
-  io.to(roomCode).emit(EVENTS.S_GAME_COUNTDOWN, {
+  io.to(room.code).emit(EVENTS.S_GAME_COUNTDOWN, {
     countdownMs: TIMING.ROUND_COUNTDOWN_MS,
-    totalRounds: session.sequence.length,
+    totalRounds: _session.sequence.length,
   });
 
-  setTimeout(() => _startRound(roomCode, io), TIMING.ROUND_COUNTDOWN_MS);
+  _schedule(() => _startRound(io), TIMING.ROUND_COUNTDOWN_MS);
+}
+
+/**
+ * Resume a game from a checkpoint (called on server restart).
+ *
+ * @param {number}          resumeIndex  Last completed roundIndex from checkpoint
+ * @param {SocketIO.Server} io
+ * @param {string[]}        [roundIds]   Round order saved in the checkpoint
+ */
+function resumeFromCheckpoint(resumeIndex, io, roundIds = null) {
+  if (!_worldRounds) {
+    throw new GameError('GameState not initialised', ERROR_CODE.INTERNAL);
+  }
+
+  const room = rooms.getRoom();
+
+  _createSession({ resumeFromIndex: resumeIndex, roundIds });
+  _session.resumed = true;
+
+  logger.info(
+    { roomCode: room.code, resumeIndex, totalRounds: _session.sequence.length },
+    'Resuming game from checkpoint'
+  );
+
+  // LEADERBOARD lets the host advance manually to the next round
+  room.state = GAME_STATE.LEADERBOARD;
+
+  // The room is normally empty right after a restart, so this broadcast only
+  // reaches anyone already connected. Reconnecting clients get the same info
+  // through buildStateSync().
+  io.to(room.code).emit(EVENTS.S_LEADERBOARD, {
+    players:     rooms.getPlayerSnapshot(),
+    roundIndex:  resumeIndex,
+    totalRounds: _session.sequence.length,
+    isLastRound: resumeIndex >= _session.sequence.length - 1,
+    resumed:     true,
+  });
 }
 
 // ─── Round Lifecycle ──────────────────────────────────────────────────────────
 
 /**
  * Begin the next round.
- * Transitions: ROUND_COUNTDOWN | LEADERBOARD → ROUND_ACTIVE
  *
- * @param {string}             roomCode
- * @param {SocketIO.Namespace} io
+ * @param {SocketIO.Server} io
  */
-function _startRound(roomCode, io) {
-  const room    = rooms.getRoom(roomCode);
-  const session = _getSession(roomCode);
+function _startRound(io) {
+  const room    = rooms.getRoom();
+  const session = _getSession();
 
   session.currentIndex += 1;
 
   const round = getRound(session.sequence, session.currentIndex);
-
   if (!round) {
-    // No more rounds — end the game
-    _endGame(roomCode, io);
+    _endGame(io);
     return;
   }
 
-  // Reset per-round guess map
-  session.guesses = new Map();
+  // Reset per-round state
+  session.guesses      = new Map();
+  session.roundClosing = false;
+  session.resumed      = false;
 
-  // Transition state
   room.state = GAME_STATE.ROUND_ACTIVE;
 
-  const durationMs    = getRoundDuration(round, TIMING);
-  session.roundEndsAt = Date.now() + durationMs;
+  const durationMs        = getRoundDuration(round, TIMING);
+  session.roundDurationMs = durationMs;
+  session.roundEndsAt     = Date.now() + durationMs;
 
-  // Broadcast round start to all clients (answer coords stripped)
-  const clientRound = sanitiseRoundForClient(round);
-  io.to(roomCode).emit(EVENTS.S_ROUND_START, {
-    round:       clientRound,
+  io.to(room.code).emit(EVENTS.S_ROUND_START, {
+    round:       sanitiseRoundForClient(round),
     roundIndex:  session.currentIndex,
     totalRounds: session.sequence.length,
     durationMs,
@@ -241,7 +393,7 @@ function _startRound(roomCode, io) {
 
   logger.info(
     {
-      roomCode,
+      roomCode:   room.code,
       roundId:    round.id,
       roundType:  round.type,
       roundIndex: session.currentIndex,
@@ -250,55 +402,54 @@ function _startRound(roomCode, io) {
     'Round started'
   );
 
-  // ── Tick timer: broadcast remaining time every second ──────────────────
-
+  // ── Tick timer — server is the authoritative clock ────────────────────
+  // Clients display remainingMs from S_ROUND_TICK and never end a round
+  // on their own.
   session.tickTimer = setInterval(() => {
+    if (_session !== session) return;
+
     const remaining = Math.max(0, session.roundEndsAt - Date.now());
-    io.to(roomCode).emit(EVENTS.S_ROUND_TICK, {
+
+    io.to(room.code).emit(EVENTS.S_ROUND_TICK, {
       remainingMs: remaining,
       roundIndex:  session.currentIndex,
     });
+
     if (remaining === 0) {
-      // Interval will be cleared by _endRound
       clearInterval(session.tickTimer);
       session.tickTimer = null;
     }
   }, 1_000);
 
-  // ── Round timer: auto-end round when time expires ─────────────────────
-
-  session.roundTimer = setTimeout(
-    () => _endRound(roomCode, io),
-    durationMs
-  );
+  // ── Round expiry — scores the round, then shows the reveal ────────────
+  _schedule(() => _endRound(io), durationMs);
 }
 
 /**
  * End the current round, score all guesses, broadcast reveal.
- * Transitions: ROUND_ACTIVE → ROUND_REVEAL → LEADERBOARD
+ * Transition: ROUND_ACTIVE → ROUND_REVEAL
  *
- * @param {string}             roomCode
- * @param {SocketIO.Namespace} io
+ * Only reachable from ROUND_ACTIVE, so a round can never be scored twice.
+ *
+ * @param {SocketIO.Server} io
  */
-function _endRound(roomCode, io) {
-  const room    = rooms.getRoom(roomCode);
-  const session = _getSession(roomCode);
+function _endRound(io) {
+  const room    = rooms.getRoom();
+  const session = _getSession();
 
-  // Guard: if state already moved on (e.g. host force-advanced), bail out
   if (room.state !== GAME_STATE.ROUND_ACTIVE) return;
 
-  _clearTimers(session);
-
+  _clearTimers();
   room.state = GAME_STATE.ROUND_REVEAL;
 
-  const round      = getRound(session.sequence, session.currentIndex);
-  const allIds     = [...room.players.values()].map((p) => p.id);
+  const round  = getRound(session.sequence, session.currentIndex);
+  const allIds = [...room.players.values()]
+    .filter((p) => p.role === ROLE.PLAYER)
+    .map((p) => p.id);
   const guessArray = [...session.guesses.values()].map((g) => ({
     playerId: g.playerId,
     coord:    g.coord,
   }));
-
-  // ── Score ─────────────────────────────────────────────────────────────
 
   const answer = round.type === ROUND_TYPE.WORLD
     ? { lat: round.lat, lng: round.lng }
@@ -311,17 +462,12 @@ function _endRound(roomCode, io) {
     allIds
   );
 
-  // ── Apply scores to persistent player objects ──────────────────────────
-
   for (const scored of scores) {
-    rooms.addScore(roomCode, scored.playerId, scored.points);
+    rooms.addScore(scored.playerId, scored.points);
   }
-  // No-guess players get 0 — no addScore call needed
 
-  // ── Build and broadcast reveal payload ────────────────────────────────
-
-  const leaderboard    = buildLeaderboard(room.players, scores, noGuessList);
-  const revealPayload  = buildRevealPayload(
+  const leaderboard   = buildLeaderboard(room.players, scores, noGuessList);
+  const revealPayload = buildRevealPayload(
     answer,
     scores,
     noGuessList,
@@ -330,167 +476,183 @@ function _endRound(roomCode, io) {
     session.sequence.length
   );
 
-  // Include the location hint and round metadata in the reveal
   revealPayload.locationHint = round.locationHint ?? null;
   revealPayload.roundType    = round.type;
   revealPayload.roundLabel   = round.label;
 
-  io.to(roomCode).emit(EVENTS.S_ROUND_REVEAL, revealPayload);
+  io.to(room.code).emit(EVENTS.S_ROUND_REVEAL, revealPayload);
 
   logger.info(
     {
-      roomCode,
-      roundIndex: session.currentIndex,
-      guessCount: guessArray.length,
+      roomCode:     room.code,
+      roundIndex:   session.currentIndex,
+      guessCount:   guessArray.length,
       noGuessCount: noGuessList.length,
     },
     'Round ended — reveal broadcast'
   );
 
-  // ── Transition to leaderboard after reveal duration ───────────────────
+  _checkpoint(room);
 
-  setTimeout(() => _showLeaderboard(roomCode, io), TIMING.REVEAL_DURATION_MS);
+  _schedule(() => _showLeaderboard(io), TIMING.REVEAL_DURATION_MS);
 }
 
 /**
- * Show the leaderboard screen between rounds (or as final screen).
- * Transitions: ROUND_REVEAL → LEADERBOARD
+ * Show leaderboard between rounds.
+ * Transition: ROUND_REVEAL → LEADERBOARD
  *
- * @param {string}             roomCode
- * @param {SocketIO.Namespace} io
+ * @param {SocketIO.Server} io
  */
-function _showLeaderboard(roomCode, io) {
-  const room    = rooms.getRoom(roomCode);
-  const session = _getSession(roomCode);
+function _showLeaderboard(io) {
+  const room    = rooms.getRoom();
+  const session = _getSession();
 
   room.state = GAME_STATE.LEADERBOARD;
 
-  const snapshot    = rooms.getPlayerSnapshot(roomCode);
   const isLastRound = session.currentIndex === session.sequence.length - 1;
 
-  io.to(roomCode).emit(EVENTS.S_LEADERBOARD, {
-    players:     snapshot,
+  io.to(room.code).emit(EVENTS.S_LEADERBOARD, {
+    players:     rooms.getPlayerSnapshot(),
     roundIndex:  session.currentIndex,
     totalRounds: session.sequence.length,
     isLastRound,
   });
 
   logger.info(
-    { roomCode, roundIndex: session.currentIndex, isLastRound },
+    { roomCode: room.code, roundIndex: session.currentIndex, isLastRound },
     'Leaderboard shown'
   );
 
   if (isLastRound) {
-    // Linger longer on the final leaderboard
-    setTimeout(() => _endGame(roomCode, io), TIMING.FINAL_LEADERBOARD_DURATION_MS);
-  } else {
-    // Countdown into next round
-    setTimeout(() => {
-      room.state = GAME_STATE.ROUND_COUNTDOWN;
-      io.to(roomCode).emit(EVENTS.S_GAME_COUNTDOWN, {
-        countdownMs: TIMING.ROUND_COUNTDOWN_MS,
-        totalRounds: session.sequence.length,
-      });
-      setTimeout(() => _startRound(roomCode, io), TIMING.ROUND_COUNTDOWN_MS);
-    }, TIMING.LEADERBOARD_DURATION_MS);
+    _schedule(() => _endGame(io), TIMING.FINAL_LEADERBOARD_DURATION_MS);
+    return;
   }
+
+  _schedule(() => _beginCountdown(io), TIMING.LEADERBOARD_DURATION_MS);
+}
+
+/**
+ * Leaderboard → countdown → next round.
+ * Shared by the automatic flow and hostAdvance().
+ *
+ * @param {SocketIO.Server} io
+ */
+function _beginCountdown(io) {
+  const room    = rooms.getRoomOrNull();
+  const session = _session;
+  if (!room || !session) return;
+
+  room.state = GAME_STATE.ROUND_COUNTDOWN;
+
+  io.to(room.code).emit(EVENTS.S_GAME_COUNTDOWN, {
+    countdownMs: TIMING.ROUND_COUNTDOWN_MS,
+    totalRounds: session.sequence.length,
+  });
+
+  _schedule(() => _startRound(io), TIMING.ROUND_COUNTDOWN_MS);
 }
 
 /**
  * End the game entirely.
- * Transitions: LEADERBOARD → GAME_OVER
+ * Transition: LEADERBOARD → GAME_OVER
  *
- * @param {string}             roomCode
- * @param {SocketIO.Namespace} io
+ * @param {SocketIO.Server} io
  */
-function _endGame(roomCode, io) {
-  const room = rooms.getRoom(roomCode);
+function _endGame(io) {
+  const room = rooms.getRoom();
   room.state = GAME_STATE.GAME_OVER;
 
-  const finalLeaderboard = rooms.getPlayerSnapshot(roomCode);
+  const finalLeaderboard = rooms.getPlayerSnapshot();
 
-  io.to(roomCode).emit(EVENTS.S_GAME_OVER, {
+  io.to(room.code).emit(EVENTS.S_GAME_OVER, {
     leaderboard: finalLeaderboard,
     podium:      finalLeaderboard.slice(0, 3),
   });
 
-  logger.info({ roomCode }, 'Game over — final results broadcast');
+  logger.info({ roomCode: room.code }, 'Game over');
 
-  // Schedule room cleanup and destroy session
-  rooms.schedulePostGameCleanup(roomCode);
-  destroySession(roomCode);
+  // Game completed cleanly — no need to resume
+  Promise.resolve(deleteCheckpoint()).catch(() => {});
+
+  rooms.schedulePostGameCleanup();
+  destroySession();
 }
 
 // ─── Host Controls ────────────────────────────────────────────────────────────
 
 /**
- * Allow the host to manually advance past the current reveal/leaderboard
- * and immediately start the next round (or end the game).
- * Useful if the host wants to control pacing at the event.
+ * Advance past reveal → leaderboard, or leaderboard → next round.
+ * Only valid during ROUND_REVEAL or LEADERBOARD.
+ * Does NOT handle ROUND_ACTIVE — use forceEndRound() for that.
  *
- * Only valid during ROUND_REVEAL or LEADERBOARD states.
- *
- * @param {string}             roomCode
- * @param {SocketIO.Namespace} io
+ * @param {SocketIO.Server} io
  */
-function hostAdvance(roomCode, io) {
-  const room    = rooms.getRoom(roomCode);
-  const session = _getSession(roomCode);
+function hostAdvance(io) {
+  const room    = rooms.getRoom();
+  const session = _getSession();
 
   _assertState(room, GAME_STATE.ROUND_REVEAL, GAME_STATE.LEADERBOARD);
-  _clearTimers(session);
+
+  // Cancels the pending reveal→leaderboard / leaderboard→countdown timer
+  _clearTimers();
 
   const isLastRound = session.currentIndex === session.sequence.length - 1;
 
   logger.info(
-    { roomCode, currentState: room.state, isLastRound },
-    'Host manually advanced round'
+    { roomCode: room.code, state: room.state, isLastRound },
+    'Host advanced'
   );
 
-  if (isLastRound && room.state === GAME_STATE.LEADERBOARD) {
-    _endGame(roomCode, io);
-  } else if (room.state === GAME_STATE.ROUND_REVEAL) {
-    _showLeaderboard(roomCode, io);
+  if (room.state === GAME_STATE.ROUND_REVEAL) {
+    _showLeaderboard(io);
+  } else if (isLastRound) {
+    _endGame(io);
   } else {
-    // LEADERBOARD and not last round
-    room.state = GAME_STATE.ROUND_COUNTDOWN;
-    io.to(roomCode).emit(EVENTS.S_GAME_COUNTDOWN, {
-      countdownMs: TIMING.ROUND_COUNTDOWN_MS,
-      totalRounds: session.sequence.length,
-    });
-    setTimeout(() => _startRound(roomCode, io), TIMING.ROUND_COUNTDOWN_MS);
+    _beginCountdown(io);
   }
+}
+
+/**
+ * Force-end the currently active round immediately.
+ *
+ * @param {SocketIO.Server} io
+ */
+function forceEndRound(io) {
+  const room = rooms.getRoom();
+  _assertState(room, GAME_STATE.ROUND_ACTIVE);
+
+  _endRound(io);
 }
 
 // ─── Guess Handling ───────────────────────────────────────────────────────────
 
 /**
- * Record a player's guess for the current round.
- * Silently no-ops if the player already guessed (first guess wins).
+ * Record a player's guess. First guess wins — subsequent ones are silently ignored.
  *
- * @param {string} roomCode
- * @param {string} playerId
- * @param {Object} coord      WorldCoord or PixelCoord
- * @param {SocketIO.Namespace} io
+ * @param {string}          playerId
+ * @param {Object}          coord     WorldCoord | PixelCoord
+ * @param {SocketIO.Server} io
  * @returns {{ accepted: boolean, guessCount: number, totalPlayers: number }}
  */
-function submitGuess(roomCode, playerId, coord, io) {
-  const room    = rooms.getRoom(roomCode);
-  const session = _getSession(roomCode);
+function submitGuess(playerId, coord, io) {
+  const room    = rooms.getRoom();
+  const session = _getSession();
 
   if (room.state !== GAME_STATE.ROUND_ACTIVE) {
     throw new GameError(
-      'Cannot submit a guess — no round is currently active',
+      'Cannot submit a guess — no active round',
       ERROR_CODE.ROUND_NOT_ACTIVE
     );
   }
 
-  // First guess only — subsequent attempts from same player are silently ignored
-  if (session.guesses.has(playerId)) {
+  const totalPlayers = _activePlayers();
+
+  // Duplicate guess, or the round is already closing
+  if (session.guesses.has(playerId) || session.roundClosing) {
     return {
       accepted:     false,
-      guessCount:   session.guesses.size,
-      totalPlayers: room.players.size,
+      guessCount:   _activeGuessCount(session),
+      totalPlayers,
     };
   }
 
@@ -500,57 +662,119 @@ function submitGuess(roomCode, playerId, coord, io) {
     submittedAt: Date.now(),
   });
 
-  const guessCount   = session.guesses.size;
-  const totalPlayers = [...room.players.values()].filter(
-    (p) => p.role === ROLE.PLAYER
-  ).length;
+  const guessCount = _activeGuessCount(session);
 
-  // Broadcast live guess count to host display
-  io.to(roomCode).emit(EVENTS.S_GUESS_COUNT, {
+  io.to(room.code).emit(EVENTS.S_GUESS_COUNT, {
     guessCount,
     totalPlayers,
     roundIndex: session.currentIndex,
   });
 
-  logger.debug(
-    { roomCode, playerId, guessCount, totalPlayers },
-    'Guess recorded'
-  );
+  logger.debug({ playerId, guessCount, totalPlayers }, 'Guess recorded');
 
-  // Auto-end round early if everyone has guessed
-  if (guessCount >= totalPlayers) {
-    logger.info(
-      { roomCode, guessCount },
-      'All players guessed — ending round early'
-    );
-    _clearTimers(session);
-    // Small delay so the last guesser sees their pin land before reveal
-    setTimeout(() => _endRound(roomCode, io), 800);
-  }
+  _closeRoundIfAllGuessed(io);
 
   return { accepted: true, guessCount, totalPlayers };
 }
 
 /**
- * Get the current session for a room without throwing.
- * Used by socketHandlers for reconnection resyncing.
+ * End the round shortly if every connected player has guessed.
+ * Room state stays ROUND_ACTIVE until _endRound() runs, so hostAdvance()
+ * cannot skip scoring during the short delay.
  *
- * @param {string} roomCode
+ * Also call this when a player disconnects mid-round.
+ *
+ * @param {SocketIO.Server} io
+ */
+function _closeRoundIfAllGuessed(io) {
+  const room    = rooms.getRoomOrNull();
+  const session = _session;
+  if (!room || !session) return;
+  if (room.state !== GAME_STATE.ROUND_ACTIVE || session.roundClosing) return;
+
+  const totalPlayers = _activePlayers();
+  if (totalPlayers < 1) return;
+  if (_activeGuessCount(session) < totalPlayers) return;
+
+  logger.info({ guessCount: _activeGuessCount(session) }, 'All players guessed — ending round early');
+
+  session.roundClosing = true;
+  _clearTimers();
+  _schedule(() => _endRound(io), 500);
+}
+
+/**
+ * Public hook: call after a player disconnects or leaves during a round.
+ *
+ * @param {SocketIO.Server} io
+ */
+function checkAllGuessed(io) {
+  _closeRoundIfAllGuessed(io);
+}
+
+// ─── State Sync (for reconnecting clients) ────────────────────────────────────
+
+/**
+ * Build a full game state snapshot for a reconnecting client.
+ * Sent via S_GAME_STATE_SYNC immediately after they rejoin.
+ *
+ * @param {string} [playerId]  If given, includes whether this player already guessed
+ * @returns {Object|null}      null if no game is in progress
+ */
+function buildStateSync(playerId) {
+  const room = rooms.getRoomOrNull();
+  if (!room || !_session) return null;
+
+  const session = _session;
+
+  let currentRoundPayload = null;
+  if (session.currentIndex >= 0) {
+    const round = getRound(session.sequence, session.currentIndex);
+    if (round) {
+      currentRoundPayload = {
+        round:       sanitiseRoundForClient(round),
+        roundIndex:  session.currentIndex,
+        totalRounds: session.sequence.length,
+        durationMs:  session.roundDurationMs,
+        endsAt:      room.state === GAME_STATE.ROUND_ACTIVE ? session.roundEndsAt : null,
+      };
+    }
+  }
+
+  return {
+    gameState:   room.state,
+    players:     rooms.getPlayerSnapshot(),
+    roundIndex:  session.currentIndex,
+    totalRounds: session.sequence.length,
+    isLastRound: session.currentIndex === session.sequence.length - 1,
+    resumed:     session.resumed,
+    hasGuessed:  playerId ? session.guesses.has(playerId) : false,
+    currentRoundPayload,
+  };
+}
+
+// ─── Getters ──────────────────────────────────────────────────────────────────
+
+/**
+ * Get the current session without throwing.
+ *
  * @returns {GameSession|null}
  */
-function getSession(roomCode) {
-  return sessions.get(roomCode) ?? null;
+function getSession() {
+  return _session;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
-
-// Add to exports
 module.exports = {
   initialise,
   startGame,
+  resumeFromCheckpoint,
   submitGuess,
+  checkAllGuessed,
   hostAdvance,
+  forceEndRound,
   destroySession,
-  getSession,     // ← add this
+  getSession,
+  buildStateSync,
 };
