@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "savedAt": 1792239974270,
+  "roomCode": "F8WCT",
+  "hostPlayerId": "p_mvcd32sa_tn4t0",
+  "adminToken": "habxVHx6MBNyYtrNzU9DH6Xz4rTEAHCw",
+  "state": "ROUND_REVEAL",
+  "roundIndex": 9,
+  "roundIds": [
+    "w05",
+    "w20",
+    "w02",
+    "w08",
+    "w07",
+    "w12",
+    "w17",
+    "w03",
+    "w06",
+    "w14",
+    "w10",
+    "w13",
+    "w01",
+    "w09",
+    "w04",
+    "w19",
+    "w15",
+    "w18",
+    "w16",
+    "w11"
+  ],
+  "players": [
+    {
+      "id": "p_mvcd32sa_tn4t0",
+      "nickname": "Host",
+      "role": "host",
+      "score": 0
+    },
+    {
+      "id": "p_mvcd3dfl_ke09y",
+      "nickname": "njs",
+      "role": "player",
+      "score": 10000
+    }
+  ]
+}

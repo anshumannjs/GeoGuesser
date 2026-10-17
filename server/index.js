@@ -57,6 +57,8 @@ app.use(
           '*.openstreetmap.org',
           '*.cartocdn.com',        // <-- FIXED: Wildcard at root level for CARTO
           '*.stadiamaps.com',      // <-- ADDED: Allows Stadia/Stamen maps if used
+          'https://api.maptiler.com',
+          'basemaps.cartocdn.com',
           '*.fbcdn.net',
           '*.fna.fbcdn.net',
         ],
@@ -70,6 +72,8 @@ app.use(
           '*.openstreetmap.org',
           '*.cartocdn.com',        // <-- FIXED: Matches img-src adjustments
           '*.stadiamaps.com',      // <-- ADDED: Matches img-src adjustments
+          'https://api.maptiler.com',
+          'basemaps.cartocdn.com',
           'events.mapillary.com',
           '*.fbcdn.net',
           '*.fna.fbcdn.net',
@@ -84,6 +88,8 @@ app.use(
   })
 );
 
+app.set('trust proxy', 1);
+
 app.use(express.json({ limit: '16kb' }));
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
@@ -96,7 +102,7 @@ const httpLimiter = rateLimit({
   message:         { error: 'Too many requests, please slow down.' },
 });
 
-app.use(httpLimiter);
+// app.use(httpLimiter);
 
 // ─── Config Injection Helper ──────────────────────────────────────────────────
 

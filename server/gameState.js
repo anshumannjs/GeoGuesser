@@ -121,8 +121,8 @@ function _createSession({ resumeFromIndex = -1, roundIds = null } = {}) {
     sequence = buildRoundSequence(_worldRounds, _campusRounds, {
       maxWorldRounds:  config.MAX_WORLD_ROUNDS,
       maxCampusRounds: config.MAX_CAMPUS_ROUNDS,
-      shuffleCampus:   true,
-      shuffleWorld:    true,
+      shuffleCampus:   false,
+      shuffleWorld:    false,
     });
   }
 
@@ -643,6 +643,16 @@ function submitGuess(playerId, coord, io) {
       'Cannot submit a guess — no active round',
       ERROR_CODE.ROUND_NOT_ACTIVE
     );
+  }
+
+    const round = getRound(session.sequence, session.currentIndex);
+  const validShape = round && coord && (
+    round.type === ROUND_TYPE.WORLD
+      ? Number.isFinite(coord.lat) && Number.isFinite(coord.lng)
+      : Number.isFinite(coord.x) && Number.isFinite(coord.y)
+  );
+  if (!validShape) {
+    throw new GameError('Invalid guess for this round type', ERROR_CODE.VALIDATION_ERROR);
   }
 
   const totalPlayers = _activePlayers();

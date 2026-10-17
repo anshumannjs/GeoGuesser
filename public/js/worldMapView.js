@@ -10,6 +10,8 @@
 
 /* global L, ROUND_TYPE */
 window.MAPILLARY_CLIENT_TOKEN = 'MLY|28241307835482284|40a9903301c40dd2362c530bd97e51ee';
+const MAPTILER_KEY = "63du5ctGxFYqS5rpWtH9"
+const CARTO_KEY="cb1_4n6j_1_ee5bb391a01862da48296316"
 
 const WorldMapView = (() => {
 
@@ -28,17 +30,19 @@ const WorldMapView = (() => {
 
   // ── Tile layer URL (OpenStreetMap — no API key required) ──────────────────
 
-  const OSM_TILE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-  const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+  // const OSM_TILE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  // const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 
-  // const OSM_TILE = 'https://{s}://{z}/{x}/{y}{r}.png';
-  // const OSM_ATTR = '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>';
+  /**
+   * Safe MapTiler Raster Streets Endpoint.
+   * Notice the "/256/" path parameter — this forces MapTiler to calculate and
+   * serve standard image tiles instead of raw vector geometry to Leaflet.
+   */
+  // const OSM_TILE = `https://api.maptiler.com/maps/streets-v4/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`;
+  // const OSM_ATTR = '\u003ca href=\"https://www.maptiler.com/copyright/\" target=\"_blank\"\u003e\u0026copy; MapTiler\u003c/a\u003e \u003ca href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\"\u003e\u0026copy; OpenStreetMap contributors\u003c/a\u003e';
 
-  // const OSM_TILE = 'https://{s}://{z}/{x}/{y}{r}.png';
-  // const OSM_ATTR = '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>';
-
-  // const OSM_TILE = 'https://stadiamaps.com{z}/{x}/{y}{r}.png';
-  // const OSM_ATTR = '&copy; <a href="https://stadiamaps.com">Stadia Maps</a> &copy; <a href="https://stamen.com">Stamen Design</a> &copy; <a href="https://openmaptiles.org">OpenMapTiles</a> &copy; <a href="https://openstreetmap.org">OpenStreetMap</a>';
+  const OSM_TILE=`https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_4n6j_1_ee5bb391a01862da48296316`;
+  const OSM_ATTR='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors ' + '&copy; <a href="https://carto.com/attributions">CARTO</a>`';
 
 
   /**
@@ -97,6 +101,8 @@ const WorldMapView = (() => {
       maxZoom: 18,
       zoomControl: true,
       attributionControl: true,
+      // Prevent multiple world copies
+      worldCopyJump: false,
       // Prevent wrapping so pins don't appear on duplicate world copies
       maxBounds: [[-90, -180], [90, 180]],
       maxBoundsViscosity: 1.0,
@@ -105,7 +111,10 @@ const WorldMapView = (() => {
     // Dark tile layer
     L.tileLayer(OSM_TILE, {
       attribution: OSM_ATTR,
-      subdomains: 'abcd',
+      // subdomains: 'abcd',
+      minZoom: 2,
+      noWrap: true,
+      worldCopyJump: false,
       maxZoom: 19,
       referrerPolicy: 'no-referrer-when-downgrade' // Ensures the referrer is passed to OSM
     }).addTo(_guessMap);
@@ -188,15 +197,24 @@ const WorldMapView = (() => {
     _revealMap = L.map(containerId, {
       center: [20, 0],
       zoom: 2,
-      minZoom: 1,
+      minZoom: 2,
       maxZoom: 10,
       zoomControl: false,
       attributionControl: false,
+      worldCopyJump: false,
+      maxBounds: [
+        [-90, -180],
+        [90, 180]
+      ],
+      maxBoundsViscosity: 1.0,
     });
 
     L.tileLayer(OSM_TILE, {
       attribution: OSM_ATTR,
-      subdomains: 'abcd',
+      // subdomains: 'abcd',
+      minZoom: 2,
+      noWrap: true,
+      worldCopyJump: false,
       maxZoom: 10,
       referrerPolicy: 'no-referrer-when-downgrade' // Ensures the referrer is passed to OSM
     }).addTo(_revealMap);

@@ -172,7 +172,8 @@ function _assertHost(socketId) {
 /** @type {Map<string, number[]>} */
 const _connectionTimestamps = new Map();
 const CONNECTION_WINDOW_MS       = 60_000;
-const MAX_CONNECTIONS_PER_WINDOW = 15; // increased slightly for event wifi NAT
+// const MAX_CONNECTIONS_PER_WINDOW = 15; // increased slightly for event wifi NAT
+const MAX_CONNECTIONS_PER_WINDOW = 500; // many players share one campus NAT IP; reconnects also count
 
 /**
  * @param {string} ip
@@ -185,7 +186,11 @@ function _isRateLimited(ip) {
   const prev = (_connectionTimestamps.get(ip) ?? []).filter(
     (t) => now - t < CONNECTION_WINDOW_MS
   );
-  if (prev.length >= MAX_CONNECTIONS_PER_WINDOW) return true;
+  // if (prev.length >= MAX_CONNECTIONS_PER_WINDOW) return true;
+  // if (prev.length >= MAX_CONNECTIONS_PER_WINDOW) {
+  //   _connectionTimestamps.set(ip, prev);
+  //  return true;
+  // }
   prev.push(now);
   _connectionTimestamps.set(ip, prev);
   return false;
