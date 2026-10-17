@@ -2,7 +2,147 @@
   {
     "id": "w01",
     "type": "world",
-    "label": "Round 1 — World",
+    "label": "Round 01 — World",
+    "panoId": "403942744614940",
+    "previewUrl": "",
+    "lat": 41.004429298928,
+    "lng": 28.975033427197,
+    "locationHint": "Istanbul, Turkey"
+  },
+  {
+    "id": "w02",
+    "type": "world",
+    "label": "Round 02 — World",
+    "panoId": "935562714905071",
+    "previewUrl": "",
+    "lat": 35.660036623432,
+    "lng": 139.70059223425,
+    "locationHint": "Tokyo, Japan"
+  },
+  {
+    "id": "w03",
+    "type": "world",
+    "label": "Round 03 — World",
+    "panoId": "8171077583006345",
+    "previewUrl": "",
+    "lat": 37.575754937924,
+    "lng": 126.97663204442,
+    "locationHint": "Seoul, South Korea"
+  },
+  {
+    "id": "w04",
+    "type": "world",
+    "label": "Round 04 — World",
+    "panoId": "2934237326897225",
+    "previewUrl": "",
+    "lat": 13.756733357836,
+    "lng": 100.50156170623,
+    "locationHint": "Bangkok, Thailand"
+  },
+  {
+    "id": "w05",
+    "type": "world",
+    "label": "Round 05 — World",
+    "panoId": "1067807221602145",
+    "previewUrl": "",
+    "lat": 1.2849764530727,
+    "lng": 103.85985632053,
+    "locationHint": "Singapore"
+  },
+  {
+    "id": "w06",
+    "type": "world",
+    "label": "Round 06 — World",
+    "panoId": "783786032678261",
+    "previewUrl": "",
+    "lat": 18.921983333333,
+    "lng": 72.834655,
+    "locationHint": "Mumbai, India"
+  },
+  {
+    "id": "w07",
+    "type": "world",
+    "label": "Round 07 — World",
+    "panoId": "155071503974628",
+    "previewUrl": "",
+    "lat": 21.029127757091,
+    "lng": 105.85145416637,
+    "locationHint": "Hanoi, Vietnam"
+  },
+  {
+    "id": "w08",
+    "type": "world",
+    "label": "Round 08 — World",
+    "panoId": "519594699060916",
+    "previewUrl": "",
+    "lat": 25.19911709253,
+    "lng": 55.273851104014,
+    "locationHint": "Dubai, UAE"
+  },
+  {
+    "id": "w09",
+    "type": "world",
+    "label": "Round 09 — World",
+    "panoId": "891239660330383",
+    "previewUrl": "",
+    "lat": -1.2862220141895,
+    "lng": 36.817391301584,
+    "locationHint": "Nairobi, Kenya"
+  },
+  {
+    "id": "w10",
+    "type": "world",
+    "label": "Round 10 — World",
+    "panoId": "310105617255384",
+    "previewUrl": "",
+    "lat": 31.624088884693,
+    "lng": -7.9912169077968,
+    "locationHint": "Marrakech, Morocco"
+  },
+  {
+    "id": "w11",
+    "type": "world",
+    "label": "Round 11 — World",
+    "panoId": "565601149352918",
+    "previewUrl": "",
+    "lat": -34.603656350699,
+    "lng": -58.381382352559,
+    "locationHint": "Buenos Aires, Argentina"
+  },
+  {
+    "id": "w12",
+    "type": "world",
+    "label": "Round 12 — World",
+    "panoId": "544571501906795",
+    "previewUrl": "",
+    "lat": -33.437339039313,
+    "lng": -70.65059455098,
+    "locationHint": "Santiago, Chile"
+  },
+  {
+    "id": "w13",
+    "type": "world",
+    "label": "Round 13 — World",
+    "panoId": "310718077349116",
+    "previewUrl": "",
+    "lat": 4.5984104867451,
+    "lng": -74.075731889659,
+    "locationHint": "Bogotá, Colombia"
+  },
+  {
+    "id": "w14",
+    "type": "world",
+    "label": "Round 14 — World",
+    "panoId": "135852956074662",
+    "previewUrl": "",
+    "lat": -12.043136648287,
+    "lng": -77.029212165113,
+    "locationHint": "Lima, Peru"
+  },
+  {
+    "id": "w15",
+    "type": "world",
+    "label": "Round 15 — World",
     "panoId": "1641632342976274",
     "previewUrl": "",
     "lat": 40.7579558,
@@ -10,9 +150,9 @@
     "locationHint": "New York City, USA"
   },
   {
-    "id": "w02",
+    "id": "w16",
     "type": "world",
-    "label": "Round 2 — World",
+    "label": "Round 16 — World",
     "panoId": "184360273622815",
     "previewUrl": "",
     "lat": 51.500997222222,
@@ -20,9 +160,9 @@
     "locationHint": "London, UK"
   },
   {
-    "id": "w03",
+    "id": "w17",
     "type": "world",
-    "label": "Round 3 — World",
+    "label": "Round 17 — World",
     "panoId": "1112239992574081",
     "previewUrl": "",
     "lat": -33.856945,
@@ -30,9 +170,9 @@
     "locationHint": "Sydney, Australia"
   },
   {
-    "id": "w04",
+    "id": "w18",
     "type": "world",
-    "label": "Round 4 — World",
+    "label": "Round 18 — World",
     "panoId": "1134240288438220",
     "previewUrl": "",
     "lat": 41.890014,
@@ -40,19 +180,9 @@
     "locationHint": "Rome, Italy"
   },
   {
-    "id": "w05",
+    "id": "w19",
     "type": "world",
-    "label": "Round 5 — World",
-    "panoId": "692911112225188",
-    "previewUrl": "",
-    "lat": 52.5162193,
-    "lng": 13.3780481,
-    "locationHint": "Berlin, Germany"
-  },
-  {
-    "id": "w06",
-    "type": "world",
-    "label": "Round 6 — World",
+    "label": "Round 19 — World",
     "panoId": "459901748425495",
     "previewUrl": "",
     "lat": 43.64227913,
@@ -60,9 +190,9 @@
     "locationHint": "Toronto, Canada"
   },
   {
-    "id": "w07",
+    "id": "w20",
     "type": "world",
-    "label": "Round 7 — World",
+    "label": "Round 20 — World",
     "panoId": "1280432919939214",
     "previewUrl": "",
     "lat": 37.808022781487,
@@ -70,29 +200,9 @@
     "locationHint": "San Francisco, USA"
   },
   {
-    "id": "w08",
+    "id": "w21",
     "type": "world",
-    "label": "Round 8 — World",
-    "panoId": "1455312265323946",
-    "previewUrl": "",
-    "lat": 52.3734262,
-    "lng": 4.892528,
-    "locationHint": "Amsterdam, Netherlands"
-  },
-  {
-    "id": "w09",
-    "type": "world",
-    "label": "Round 9 — World",
-    "panoId": "221606772761391",
-    "previewUrl": "",
-    "lat": 48.208528299972,
-    "lng": 16.372174199972,
-    "locationHint": "Vienna, Austria"
-  },
-  {
-    "id": "w10",
-    "type": "world",
-    "label": "Round 10 — World",
+    "label": "Round 21 — World",
     "panoId": "1449115635688163",
     "previewUrl": "",
     "lat": 50.087043537236,
@@ -100,29 +210,9 @@
     "locationHint": "Prague, Czech Republic"
   },
   {
-    "id": "w11",
+    "id": "w22",
     "type": "world",
-    "label": "Round 11 — World",
-    "panoId": "538483358208031",
-    "previewUrl": "",
-    "lat": 55.6737875,
-    "lng": 12.5656005,
-    "locationHint": "Copenhagen, Denmark"
-  },
-  {
-    "id": "w12",
-    "type": "world",
-    "label": "Round 12 — World",
-    "panoId": "1906685269835116",
-    "previewUrl": "",
-    "lat": 59.325752738898,
-    "lng": 18.071532976359,
-    "locationHint": "Stockholm, Sweden"
-  },
-  {
-    "id": "w13",
-    "type": "world",
-    "label": "Round 13 — World",
+    "label": "Round 22 — World",
     "panoId": "1093761092362659",
     "previewUrl": "",
     "lat": 60.166707399681,
@@ -130,19 +220,9 @@
     "locationHint": "Helsinki, Finland"
   },
   {
-    "id": "w14",
+    "id": "w23",
     "type": "world",
-    "label": "Round 14 — World",
-    "panoId": "1387419446542090",
-    "previewUrl": "",
-    "lat": 40.416722389085,
-    "lng": -3.7033219528557,
-    "locationHint": "Madrid, Spain"
-  },
-  {
-    "id": "w15",
-    "type": "world",
-    "label": "Round 15 — World",
+    "label": "Round 23 — World",
     "panoId": "114898034571442",
     "previewUrl": "",
     "lat": 38.713919799998,
@@ -150,19 +230,9 @@
     "locationHint": "Lisbon, Portugal"
   },
   {
-    "id": "w16",
+    "id": "w24",
     "type": "world",
-    "label": "Round 16 — World",
-    "panoId": "1147092359849443",
-    "previewUrl": "",
-    "lat": 53.3439608,
-    "lng": -6.2552309,
-    "locationHint": "Dublin, Ireland"
-  },
-  {
-    "id": "w17",
-    "type": "world",
-    "label": "Round 17 — World",
+    "label": "Round 24 — World",
     "panoId": "1232683615473427",
     "previewUrl": "",
     "lat": 64.141929515799,
@@ -170,53 +240,13 @@
     "locationHint": "Reykjavik, Iceland"
   },
   {
-    "id": "w18",
+    "id": "w25",
     "type": "world",
-    "label": "Round 18 — World",
-    "panoId": "381708458267982",
-    "previewUrl": "",
-    "lat": -37.817668778597,
-    "lng": 144.96739485736,
-    "locationHint": "Melbourne, Australia"
-  },
-  {
-    "id": "w19",
-    "type": "world",
-    "label": "Round 19 — World",
+    "label": "Round 25 — World",
     "panoId": "880835024290627",
     "previewUrl": "",
     "lat": -36.844386186484,
     "lng": 174.76813936012,
     "locationHint": "Auckland, New Zealand"
-  },
-  {
-    "id": "w20",
-    "type": "world",
-    "label": "Round 20 — World",
-    "panoId": "1104767463377391",
-    "previewUrl": "",
-    "lat": 41.882773,
-    "lng": -87.623068,
-    "locationHint": "Chicago, USA"
-  },
-  {
-    "id": "w21",
-    "type": "world",
-    "label": "Round 21 — World",
-    "panoId": "914826181252211",
-    "previewUrl": "",
-    "lat": 47.377013541667,
-    "lng": 8.5404391041667,
-    "locationHint": "Zurich, Switzerland"
-  },
-  {
-    "id": "w22",
-    "type": "world",
-    "label": "Round 22 — World",
-    "panoId": "4250188098594984",
-    "previewUrl": "",
-    "lat": 48.137129095833,
-    "lng": 11.575401195833,
-    "locationHint": "Munich, Germany"
   }
 ]

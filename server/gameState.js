@@ -2,6 +2,7 @@
 
 const logger  = require('./logger');
 const config  = require('./config');
+const { saveTop10 } = require('./results');
 const {
   GAME_STATE,
   TIMING,
@@ -563,6 +564,12 @@ function _endGame(io) {
   room.state = GAME_STATE.GAME_OVER;
 
   const finalLeaderboard = rooms.getPlayerSnapshot();
+
+  const fixedLeaderboard = rooms.getPlayerSnapshot()
+  .filter((p) => p.role !== ROLE.HOST)
+  .sort((a, b) => b.score - a.score);
+
+saveTop10(fixedLeaderboard);
 
   io.to(room.code).emit(EVENTS.S_GAME_OVER, {
     leaderboard: finalLeaderboard,
